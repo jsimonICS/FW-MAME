@@ -1,0 +1,6 @@
+[submodule "wilicm0bsp"]
+	path = wilicm0bsp
+	url = https://github.com/freewili/wilicm0bsp
+[submodule "wilifpga"]
+	path = wilifpga
+	url = https://github.com/freewili/wilifpga

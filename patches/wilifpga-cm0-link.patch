@@ -1,0 +1,49 @@
+diff --git a/fpga/shell/fw2_shell.v b/fpga/shell/fw2_shell.v
+index 552b791..ff7d949 100644
+--- a/fpga/shell/fw2_shell.v
++++ b/fpga/shell/fw2_shell.v
+@@ -194,8 +194,18 @@ fw2_pad u_pad_sram2 (.pad(SRAM_IO2), .o(1'b0), .oe(1'b0), .i(sram_io_in[2]));
+ fw2_pad u_pad_sram3 (.pad(SRAM_IO3), .o(1'b0), .oe(1'b0), .i(sram_io_in[3]));
+ assign SRAM_CLK = 1'b0;
+ assign SRAM_CS  = 1'b1;
++`ifdef FW2_CM0_LINK
++// FW-MAME patch: designs with [host] cm0_link = true get the CM0 nets.
++// Directions are unchanged from the stock shell (5 in, 2 out). The two outputs
++// follow the design only while IO_ARM = 1 and idle high otherwise, as above.
++wire [4:0] cm0_in = {CM0_SPI1_CLK, CM0_SPI1_MISO, CM0_RX1, CM0_SPI0_CLK, CM0_SPI0_MISO};
++wire [1:0] cm0_out;
++assign CM0_RX0  = io_arm ? cm0_out[0] : 1'b1;
++assign CM0_CTS0 = io_arm ? cm0_out[1] : 1'b1;
++`else
+ assign CM0_RX0  = 1'b1;   // UART idle
+ assign CM0_CTS0 = 1'b1;   // CTS_n: not ready
++`endif
+ 
+ // ====================== //
+ // ==== Register bus ==== //
+@@ -427,6 +437,11 @@ u_user
+   .fifo_rx_data(fifo_rx_data),
+   .fifo_rx_valid(fifo_rx_valid),
+   .fifo_rx_ready(fifo_rx_ready)
++`ifdef FW2_CM0_LINK
++  ,
++  .cm0_in(cm0_in),
++  .cm0_out(cm0_out)
++`endif
+ );
+ 
+ endmodule
+diff --git a/tools/gen_design_id.py b/tools/gen_design_id.py
+index 88a6faf..aeaf1b6 100644
+--- a/tools/gen_design_id.py
++++ b/tools/gen_design_id.py
+@@ -98,6 +98,9 @@ def render_vh(design):
+     ]
+     for sig in iop.SIGNAL_NAMES:
+         lines.append(f"`define FW2_IOP_{sig.upper()} 3'd{iop.MODES[design.io_profile[sig]]}")
++    # FW-MAME patch: [host] cm0_link = true gives user_core the CM0 nets (fw2_shell.v).
++    if design.extras.get("host", {}).get("cm0_link") is True:
++        lines.append("`define FW2_CM0_LINK 1")
+     lines.append("`endif // FW2_DESIGN_ID_VH")
+     return "\n".join(lines) + "\n"
+ 

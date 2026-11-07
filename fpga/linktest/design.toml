@@ -1,0 +1,26 @@
+[design]
+name          = "linktest"
+description   = "FW-MAME link test: edge counters, SPI and UART receivers on the CM0 nets, UART back to the CM0"
+version       = "001"
+design_id     = 19531          # 0x4C4B "LK"
+kind          = "user"
+clock_hz      = 31250000       # UART at clk/4 = 7.8125 Mbaud, the CM0 stock rate
+capabilities  = ["IO_BUFFER"]  # not "CM0": that flag means the stock mailbox
+repository    = "github.com/jsimonICS/FW-MAME"
+
+# FW-MAME wilifpga patch: hand the CM0 nets to user_core (cm0_in / cm0_out).
+[host]
+cm0_link = true
+
+# The header is not used: every signal keeps the stock passthrough.
+[io_profile]
+spi_miso = "PASS_IN"
+spi_cs   = "PASS_OUT"
+spi_sclk = "PASS_OUT"
+spi_mosi = "PASS_OUT"
+uart_tx  = "PASS_OUT"
+uart_rx  = "PASS_IN"
+uart_cts = "PASS_IN"
+uart_rts = "PASS_OUT"
+gpio26   = "PASS_OUT"
+gpio27   = "PASS_OUT"
