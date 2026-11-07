@@ -1,0 +1,31 @@
+[design]
+name          = "fbuf"
+description   = "FW-MAME framebuffer: CM0 frames over SPI into SPRAM, 256-color palette, 15 kHz RGB333 + CSYNC on the header"
+version       = "001"
+design_id     = 17986          # 0x4642 "FB"
+kind          = "user"
+clock_hz      = 25000000       # FW-TPG's timing: 40 ns clocks, 1589-clock lines
+capabilities  = ["IO_BUFFER"]
+repository    = "github.com/jsimonICS/FW-MAME"
+
+# FW-MAME wilifpga patch: hand the CM0 nets to user_core (cm0_in / cm0_out).
+[host]
+cm0_link = true
+
+# All ten header signals are video outputs, FW-TPG's pins and ladder board.
+# MSB first per channel:
+#   blue  B2 GPIO8 uart_tx,   B1 GPIO9 uart_rx,   B0 GPIO10 uart_cts
+#   green G2 GPIO11 uart_rts, G1 GPIO12 spi_miso, G0 GPIO13 spi_cs
+#   red   R2 GPIO14 spi_sclk, R1 GPIO15 spi_mosi, R0 GPIO26
+#   CSYNC GPIO27 (active low)
+[io_profile]
+spi_miso = "FPGA_OUT"
+spi_cs   = "FPGA_OUT"
+spi_sclk = "FPGA_OUT"
+spi_mosi = "FPGA_OUT"
+uart_tx  = "FPGA_OUT"
+uart_rx  = "FPGA_OUT"
+uart_cts = "FPGA_OUT"
+uart_rts = "FPGA_OUT"
+gpio26   = "FPGA_OUT"
+gpio27   = "FPGA_OUT"

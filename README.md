@@ -8,12 +8,15 @@ The plan:
   plus composite sync on the 20-pin header. It's the same signal, pins and
   resistor ladder board as [FW-TPG](https://github.com/jsimonICS/FW-TPG).
 
-Status: **milestones 1 (link test) and 2 (fast link) are done on hardware**
-(2026-11-07). The CM0 pin map is known. With an FPGA receiver clocked by the
-CM0's SCLK and a C sender, SPI carries **8.24 MB/s error-free at 66.7 MHz**,
-2.4× what raw 8-bit frames need. Full results:
-[docs/linktest-results.md](docs/linktest-results.md),
-[docs/fastlink-results.md](docs/fastlink-results.md).
+Status: **milestones 1-3 are done on hardware** (2026-11-07):
+- **Link test:** the CM0 pin map is known.
+- **Fast link:** SPI carries 8.24 MB/s error-free at 66.7 MHz.
+- **Framebuffer:** the CM0 draws double-buffered 256×224 frames on the CRT at
+  a steady 60.05 fps, a new frame every field.
+
+Full results: [docs/linktest-results.md](docs/linktest-results.md),
+[docs/fastlink-results.md](docs/fastlink-results.md),
+[docs/fbuf-results.md](docs/fbuf-results.md).
 
 ## How it fits together
 
@@ -130,8 +133,10 @@ optional. The plan is 40-50 MHz for margin.
    [docs/fastlink-results.md](docs/fastlink-results.md).* Along the way the
    CM0 got a USB network link ([cm0/usbnet](cm0/usbnet)) that works while our
    designs are loaded.
-3. **Framebuffer:** SPRAM double buffer, palette and RGB333 timing (ported
-   from FW-TPG), with a CM0 tool that sends test images.
+3. **Framebuffer** ([fpga/fbuf](fpga/fbuf), [cm0/fb](cm0/fb)): SPRAM double
+   buffer, 256-color palette and FW-TPG's 15 kHz RGB333 timing, plus a CM0
+   library and test tool. *Done: 60.05 fps with whole frames, see
+   [docs/fbuf-results.md](docs/fbuf-results.md).*
 4. **Inputs:** a display app that writes buttons and analog input to FPGA
    registers, and a CM0 daemon that reads them and presents a Linux input
    device to MAME.
@@ -149,6 +154,9 @@ optional. The plan is 40-50 MHz for margin.
 | [fpga/fastlink](fpga/fastlink) | Fast-link FPGA design (SCLK-clocked SPI receiver) and testbench |
 | [cm0/fastlink.c](cm0/fastlink.c) | CM0 sender and UART receiver for the fast link test (C) |
 | [host/fastlink_run.py](host/fastlink_run.py), [host/faststat.py](host/faststat.py) | Full fast-link run over SSH + MAIN; reads and controls the design |
+| [fpga/fbuf](fpga/fbuf) | Framebuffer FPGA design (SPRAM double buffer, palette, 15 kHz video) and testbench |
+| [cm0/fb](cm0/fb) | CM0 framebuffer library (`fwfb.h`) and `fbsend` (test card, images, animation) |
+| [host/img2fb.py](host/img2fb.py) | Converts an image to framebuffer pixels + RGB333 palette |
 | [host/cm0sh.py](host/cm0sh.py), [host/cm0put.py](host/cm0put.py) | Shell commands and file copies to the CM0 through MAIN (fallback) |
 | [cm0/usbnet](cm0/usbnet), [cm0/usbnet_test.sh](cm0/usbnet_test.sh) | CM0 USB port as network + COM port (permanent install, live test) |
 | [docs](docs) | Results |
@@ -210,6 +218,33 @@ no known password, but the COM port shell is already logged in):
 ssh -i ~/.ssh/fw2_cm0 pi@10.12.194.1
 scp -i ~/.ssh/fw2_cm0 cm0/fastlink.c pi@10.12.194.1:/tmp/
 ```
+
+## Running the framebuffer
+
+Connect FW-TPG's ladder board and the monitor to the header. Then, from the
+PC:
+
+```sh
+(cd wilifpga && tools/fwfpga build fbuf && tools/fwfpga --port COM14 install fbuf)
+scp -i ~/.ssh/fw2_cm0 -r cm0/fb pi@10.12.194.1:/tmp/
+ssh -i ~/.ssh/fw2_cm0 pi@10.12.194.1 "make -C /tmp/fb && sudo systemctl kill -s KILL fwcm0-bridge && \
+    sudo modprobe -r spidev && sudo modprobe spidev bufsiz=65536"
+(cd wilifpga && tools/fwfpga --port COM14 load fbuf)
+```
+
+On the CM0:
+
+```sh
+sudo /tmp/fb/fbsend card                     # test card, 256x224
+sudo /tmp/fb/fbsend anim --seconds 30        # bouncing boxes, prints fps and timing
+sudo /tmp/fb/fbsend card --size 288x224      # other sizes: any even W x H <= 65536
+```
+
+To show your own picture, run `python host/img2fb.py pic.png pic --size 256x224`
+on the PC, copy `pic.raw` and `pic.pal` over, then run
+`sudo /tmp/fb/fbsend image pic.raw pic.pal`. The FPGA keeps showing the last
+frame after `fbsend` exits. To finish, run `tools/fwfpga restore` on the PC
+and `sudo systemctl start fwcm0-bridge` on the CM0.
 
 ## Running the fast link test
 
