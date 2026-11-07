@@ -8,15 +8,20 @@ The plan:
   plus composite sync on the 20-pin header. It's the same signal, pins and
   resistor ladder board as [FW-TPG](https://github.com/jsimonICS/FW-TPG).
 
-Status: **milestones 1-3 are done on hardware** (2026-11-07):
+Status: **milestones 1-3 and phase 1 of milestone 4 are done on hardware**
+(2026-11-07):
 - **Link test:** the CM0 pin map is known.
 - **Fast link:** SPI carries 8.24 MB/s error-free at 66.7 MHz.
 - **Framebuffer:** the CM0 draws double-buffered 256×224 frames on the CRT at
   a steady 60.05 fps, a new frame every field.
+- **Inputs, FW2 buttons:** all 14 buttons reach the CM0 in under one field.
+  The FW2 display app ([fw2/apps/fwmame](fw2/apps/fwmame)) also loads the
+  FPGA design itself.
 
 Full results: [docs/linktest-results.md](docs/linktest-results.md),
 [docs/fastlink-results.md](docs/fastlink-results.md),
-[docs/fbuf-results.md](docs/fbuf-results.md).
+[docs/fbuf-results.md](docs/fbuf-results.md),
+[docs/input-results.md](docs/input-results.md).
 
 ## How it fits together
 
@@ -38,9 +43,11 @@ Full results: [docs/linktest-results.md](docs/linktest-results.md),
 
 **Inputs:** the CM0 normally reaches MAIN through the stock FPGA gateware,
 which is replaced while this design runs (see below). So inputs take a
-different route: a display app reads the FW2's buttons and analog input and
-writes them to FPGA registers through MAIN. The CM0 then reads them from the
-FPGA.
+different route. The display app reads the FW2's buttons and writes them to
+FPGA registers through MAIN, one `h\f\w` per change, taking 1-2 ms. The FPGA
+sends them to the CM0 every field, in the same UART packet that carries the
+vsync status. In phase 2 a USB controller on the FW2's own USB host port,
+driven by the display CPU, takes the same route.
 
 ## What we know so far
 
@@ -137,9 +144,14 @@ optional. The plan is 40-50 MHz for margin.
    buffer, 256-color palette and FW-TPG's 15 kHz RGB333 timing, plus a CM0
    library and test tool. *Done: 60.05 fps with whole frames, see
    [docs/fbuf-results.md](docs/fbuf-results.md).*
-4. **Inputs:** a display app that writes buttons and analog input to FPGA
-   registers, and a CM0 daemon that reads them and presents a Linux input
-   device to MAME.
+4. **Inputs** ([fw2/apps/fwmame](fw2/apps/fwmame), `fbuf` v002, `fwfb_inputs()`):
+   - *Phase 1, FW2 buttons: done, see
+     [docs/input-results.md](docs/input-results.md).* The 14 buttons go from
+     the display app through MAIN and the FPGA to the CM0. No CM0 daemon is
+     needed: the MAME frontend reads them from `fwfb`.
+   - Phase 2, USB joystick: a HID gamepad or XInput controller on the FW2's
+     USB host port, read by the display CPU (wilibsp's PIO-USB host, not yet
+     verified on hardware), sent in input bytes 2-5.
 5. **MAME:** MAME 2003-Plus with its video output sent over the link. Add
    changed-line and palette compression if the bandwidth needs it.
 
@@ -157,6 +169,8 @@ optional. The plan is 40-50 MHz for margin.
 | [fpga/fbuf](fpga/fbuf) | Framebuffer FPGA design (SPRAM double buffer, palette, 15 kHz video) and testbench |
 | [cm0/fb](cm0/fb) | CM0 framebuffer library (`fwfb.h`) and `fbsend` (test card, images, animation) |
 | [host/img2fb.py](host/img2fb.py) | Converts an image to framebuffer pixels + RGB333 palette |
+| [fw2/apps/fwmame](fw2/apps/fwmame) | FW2 display app: loads `fbuf`, sends the buttons (built against wilibsp) |
+| [tools/gen_fwfpga_header.py](tools/gen_fwfpga_header.py) | Builds an FPGA design and embeds it in a display app |
 | [host/cm0sh.py](host/cm0sh.py), [host/cm0put.py](host/cm0put.py) | Shell commands and file copies to the CM0 through MAIN (fallback) |
 | [cm0/usbnet](cm0/usbnet), [cm0/usbnet_test.sh](cm0/usbnet_test.sh) | CM0 USB port as network + COM port (permanent install, live test) |
 | [docs](docs) | Results |

@@ -5,6 +5,7 @@
 //   sudo ./fbsend card                         # test card at 256x224
 //   sudo ./fbsend image pic.raw pic.pal --size 288x224   # from host/img2fb.py
 //   sudo ./fbsend anim --seconds 10            # moving boxes, double buffered; prints frame stats
+//   sudo ./fbsend input --seconds 60           # show the FW2 / USB pad inputs live (fbuf v002)
 //   sudo ./fbsend ramp on|off                  # FPGA's built-in palette ramp
 //
 // Options: --size WxH (default 256x224), --cpp N (pixel width in 40 ns
@@ -131,7 +132,7 @@ static int cmd_anim(void) {
     bx[i] = (i * 37) % (W - sz); by[i] = (i * 53) % (H - sz);
     vx[i] = (i % 2 ? 1 : -1) * (1 + i % 3); vy[i] = (i % 3 ? 1 : -1) * (1 + i % 2);
   }
-  int frames = 0, timeouts = 0, last_field = fwfb_status(fb) & 63, fields = 0, missed = 0;
+  int frames = 0, timeouts = 0, last_field = fwfb_status(fb) & 31, fields = 0, missed = 0;
   double send_ms = 0, wait_ms = 0, worst_send = 0, t_start = now_s();
   while (now_s() - t_start < SECONDS) {
     memcpy(px, bg, n);
@@ -149,7 +150,7 @@ static int cmd_anim(void) {
     send_ms += (t1 - t0) * 1e3;
     wait_ms += (t2 - t1) * 1e3;
     if ((t1 - t0) * 1e3 > worst_send) worst_send = (t1 - t0) * 1e3;
-    int field = fwfb_status(fb) & 63, step = (field - last_field) & 63;
+    int field = fwfb_status(fb) & 31, step = (field - last_field) & 31;
     fields += step;
     if (step > 1) missed += step - 1;
     last_field = field;
@@ -165,8 +166,70 @@ static int cmd_anim(void) {
   return 0;
 }
 
+// ---- input viewer: the FW2's controls on the CRT, lit while held ----
+static void box(uint8_t *px, int x, int y, int w, int h, uint8_t c) {
+  for (int j = y; j < y + h && j < H; j++)
+    if (j >= 0) memset(px + (size_t)j * W + x, c, (size_t)(x + w <= W ? w : W - x));
+}
+
+static void draw_inputs(uint8_t *px, const uint8_t in[8]) {
+  unsigned btn = in[0] | in[1] << 8, pad = in[2] | in[3] << 8;
+  const uint8_t OFF = 9, BLACK = 7;
+  memset(px, BLACK, (size_t)W * H);
+  box(px, 8, 8, in[7], 4, 2);                                   // update counter (0-255 px)
+  // nav pad: up, down, left, right, centre
+  static const int nav[5][3] = {{FWFB_BTN_NAV_UP, 60, 50}, {FWFB_BTN_NAV_DOWN, 60, 110},
+                                {FWFB_BTN_NAV_LEFT, 30, 80}, {FWFB_BTN_NAV_RIGHT, 90, 80},
+                                {FWFB_BTN_NAV_CENTER, 60, 80}};
+  for (int i = 0; i < 5; i++) box(px, nav[i][1], nav[i][2], 26, 26, (btn >> nav[i][0] & 1) ? 0 : OFF);
+  // HOME, OK, CANCEL, PAGE
+  for (int i = 0; i < 4; i++) box(px, 140 + i * 28, 40, 22, 16, (btn >> (FWFB_BTN_HOME + i) & 1) ? 2 : OFF);
+  // the five coloured buttons, left to right as on the FW2
+  static const uint8_t lit[5] = {0, 1, 3, 6, 5};
+  for (int i = 0; i < 5; i++) box(px, 8 + i * 50, 170, 40, 30, (btn >> i & 1) ? lit[i] : OFF);
+  // USB controller: d-pad, 8 buttons, stick
+  for (int i = 0; i < FWFB_PAD_COUNT; i++) box(px, 140 + (i % 6) * 18, 80 + (i / 6) * 18, 14, 14, (pad >> i & 1) ? 4 : OFF);
+  int sx = 220 + (int8_t)in[4] * 16 / 128, sy = 140 + (int8_t)in[5] * 16 / 128;
+  box(px, 204, 124, 34, 34, 8);
+  box(px, sx - 2, sy - 2, 5, 5, 0);
+}
+
+static const char *btn_name[FWFB_BTN_COUNT] = {"GREY", "YELLOW", "GREEN", "BLUE", "RED", "NAV-C", "UP",
+                                               "DOWN", "LEFT", "RIGHT", "HOME", "OK", "CANCEL", "PAGE"};
+
+static int cmd_input(void) {
+  fwfb *fb = open_mode();
+  uint16_t pal[256];
+  card_palette(pal);
+  if (fwfb_palette(fb, 0, 256, pal)) return 1;
+  uint8_t *px = malloc((size_t)W * H), in[8] = {0}, last[8] = {1};
+  double t0 = now_s();
+  int packets = 0, changes = 0, updates = 0;
+  while (now_s() - t0 < SECONDS) {
+    if (fwfb_wait_status(fb, 100) < 0) { fprintf(stderr, "no packet in 100 ms\n"); return 1; }
+    packets++;
+    fwfb_inputs(fb, in);
+    if (in[7] != last[7]) updates++;           // the app writes on every change and every 500 ms
+    if (!memcmp(in, last, 7)) { last[7] = in[7]; continue; }
+    memcpy(last, in, 8);
+    changes++;
+    unsigned btn = in[0] | in[1] << 8;
+    printf("[%7.3f] %02X%02X %02X%02X %02X %02X %02X #%3u :", now_s() - t0, in[1], in[0], in[3], in[2], in[4], in[5],
+           in[6], in[7]);
+    for (int i = 0; i < FWFB_BTN_COUNT; i++)
+      if (btn >> i & 1) printf(" %s", btn_name[i]);
+    printf("\n");
+    fflush(stdout);
+    draw_inputs(px, in);
+    if (fwfb_pixels(fb, 0, px, (size_t)W * H) || fwfb_flip(fb)) return 1;
+  }
+  printf("input: %d packets, %d changes, %d app updates in %.1f s\n", packets, changes, updates, now_s() - t0);
+  fwfb_close(fb);
+  return 0;
+}
+
 static int usage(void) {
-  fprintf(stderr, "usage: fbsend card | image RAW [PAL] | anim | ramp on|off   [--size WxH] [--cpp N] [--hz N] [--seconds S]\n");
+  fprintf(stderr, "usage: fbsend card | image RAW [PAL] | anim | input | ramp on|off   [--size WxH] [--cpp N] [--hz N] [--seconds S]\n");
   return 2;
 }
 
@@ -188,6 +251,7 @@ int main(int argc, char **argv) {
   if (!strcmp(pos[0], "card")) return cmd_card();
   if (!strcmp(pos[0], "image") && pos[1]) return cmd_image(pos[1], pos[2]);
   if (!strcmp(pos[0], "anim")) return cmd_anim();
+  if (!strcmp(pos[0], "input")) return cmd_input();
   if (!strcmp(pos[0], "ramp") && pos[1]) {
     fwfb *fb = fwfb_open(HZ);
     if (!fb) return 1;

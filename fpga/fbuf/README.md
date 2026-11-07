@@ -29,6 +29,15 @@ The packet format, timing and register map are in the header of
   partial updates, unknown and odd-length packets, the test ramp, hsync
   width, the status bytes and the counters.
 
+**v002 (milestone 4) adds inputs.** MAIN writes 8 input bytes to registers
+0x30-0x37, committed together on the write to 0x37. The status message to
+the CM0 grows from 1 byte to an 11-byte packet: a status byte with bit 7 set,
+then the 64 input bits, 7 per byte. It's sent at every vblank start and after
+every flip. The display app [fw2/apps/fwmame](../../fw2/apps/fwmame) writes
+the inputs and loads this design. On hardware, all 14 FW2 buttons reached the
+CM0 ([docs/input-results.md](../../docs/input-results.md)). It uses 42% of the
+logic and meets timing at 33.4 MHz.
+
 **Hardware, 2026-11-07:** test card and a double-buffered animation on the
 CRT, confirmed good by eye. 256×224 frames take 9.3 ms at 6.1 MB/s (50 MHz
 SPI). The animation runs at 60.05 fps, a new frame every field, with no

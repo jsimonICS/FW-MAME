@@ -30,10 +30,19 @@
 //   others        ignored to the end of the packet
 //
 // ---- Back to the CM0 ----
-// At the start of every vblank (after any flip) one byte goes out on the UART
-// (GPIO15, 8N1 at 6.25 Mbaud = clk/4): bit 7 front buffer, bit 6 flip still
-// pending (always 0 here, kept for later), bits 5:0 field count. A FLIP is
-// done when a byte arrives whose bit 7 has changed. CTS_n is held low.
+// At the start of every vblank and after every flip (one packet if both
+// happen together), an 11-byte packet goes out on the UART (GPIO15, 8N1 at
+// 6.25 Mbaud = clk/4, 17.6 us):
+//   byte 0      1 F P N N N N N : F front buffer, P flip pending, N field count
+//   bytes 1-10  0 D D D D D D D : the 64 input bits (registers 0x30-0x37,
+//               byte 0x30 bit 0 first), 7 per byte, LSB first, padded with 0
+// Only byte 0 has bit 7 set, so a reader can sync on it. A FLIP is done when a
+// packet arrives whose F has changed. CTS_n is held low.
+//
+// ---- Inputs ----
+// MAIN (the FW2 display app, over h\f\w) writes the input state to 0x30-0x37;
+// the write to 0x37 commits all eight bytes at once, so write all eight in
+// one h\f\w. The layout is the display app's (cm0/fb/fwfb.h).
 //
 // ---- Registers (MAIN, user window) ----
 //   0x10      rw  CONTROL: bit 0 test ramp (pixel index = x, ignores the
@@ -50,6 +59,8 @@
 //   0x24-0x27 r   packets received      0x28-0x2B r   words received
 //   0x2C-0x2D r   flips done            0x2E      r   ignored packets (unknown command)
 //   0x2F      r   errors: bits 3:0 write overruns, bits 7:4 fetch underruns (saturating)
+//   0x30-0x37 rw  input state (staged; a write to 0x37 commits). Reads the committed value.
+//   0x38      r   input updates (commits, live, wraps)
 
 `include "fw2_profile.vh"
 
@@ -76,7 +87,7 @@ module user_core (
   output wire [1:0] cm0_out
 );
 
-localparam [7:0] REVISION = 8'd1;
+localparam [7:0] REVISION = 8'd2;
 
 // ======================================================= video timing (FW-TPG)
 localparam [10:0] H_TOTAL   = 11'd1589;
@@ -474,22 +485,46 @@ end
 assign hdr_out = out_q;
 assign hdr_oe  = 10'h3FF;
 
-// ======================================================= UART status to the CM0
-// A byte {front, pending, fields[5:0]} at every vblank start and after every
-// flip (one byte if both happen together).
-localparam [3:0] DIV = 4'd4;         // 6.25 Mbaud
-reg [9:0] tx_sh = 10'h3FF;
-reg [3:0] tx_bit = 4'd0, tx_cnt = 4'd0;
-reg       tx_req = 1'b0;
-reg       txd = 1'b1;
+// ======================================================= inputs from MAIN
+reg [63:0] in_stage = 64'd0, inputs = 64'd0;
+reg [7:0]  in_updates = 8'd0;
 always @(posedge clk) begin
   if (!rst_n) begin
-    tx_bit <= 4'd0; tx_cnt <= 4'd0; txd <= 1'b1; tx_req <= 1'b0;
+    in_stage <= 64'd0; inputs <= 64'd0; in_updates <= 8'd0;
+  end else if (reg_wr && reg_addr[6:3] == 4'h6) begin            // 0x30-0x37
+    in_stage[reg_addr[2:0] * 8 +: 8] <= reg_wdata;
+    if (reg_addr[2:0] == 3'd7) begin
+      inputs     <= {reg_wdata, in_stage[55:0]};
+      in_updates <= in_updates + 8'd1;
+    end
+  end
+end
+
+// ======================================================= UART packets to the CM0
+// 11 bytes {status, 10 x 7 input bits} at every vblank start and after every
+// flip (one packet if both happen together).
+localparam [3:0] DIV = 4'd4;         // 6.25 Mbaud
+reg [9:0]  tx_sh = 10'h3FF;
+reg [3:0]  tx_bit = 4'd0, tx_cnt = 4'd0;
+reg [3:0]  tx_byte = 4'd0;           // bytes still to send after the current one
+reg [69:0] tx_data = 70'd0;          // input bits not yet sent
+reg        tx_req = 1'b0;
+reg        txd = 1'b1;
+always @(posedge clk) begin
+  if (!rst_n) begin
+    tx_bit <= 4'd0; tx_cnt <= 4'd0; tx_byte <= 4'd0; txd <= 1'b1; tx_req <= 1'b0;
   end else begin
     if (vblank_start || flip_now) tx_req <= 1'b1;   // sent from the next clock: front is updated
-    if (tx_req && tx_bit == 4'd0 && tx_cnt == 4'd0) begin
-      tx_sh  <= {1'b1, front, flip_pend, fields[5:0], 1'b0};
-      tx_bit <= 4'd10;
+    if (tx_bit == 4'd0 && tx_cnt == 4'd0 && tx_byte != 4'd0) begin
+      tx_sh   <= {1'b1, 1'b0, tx_data[6:0], 1'b0};  // next input byte
+      tx_data <= {7'd0, tx_data[69:7]};
+      tx_bit  <= 4'd10;
+      tx_byte <= tx_byte - 4'd1;
+    end else if (tx_req && tx_bit == 4'd0 && tx_cnt == 4'd0) begin
+      tx_sh   <= {1'b1, 1'b1, front, flip_pend, fields[4:0], 1'b0};
+      tx_data <= {6'd0, inputs};
+      tx_bit  <= 4'd10;
+      tx_byte <= 4'd10;
       if (!(vblank_start || flip_now)) tx_req <= 1'b0;
     end else if (tx_cnt != 4'd0) begin
       tx_cnt <= tx_cnt - 4'd1;
@@ -536,6 +571,11 @@ always @* begin
     7'h2C: rd = s_flips[7:0];    7'h2D: rd = s_flips[15:8];
     7'h2E: rd = s_ignored;
     7'h2F: rd = s_errs;
+    7'h30: rd = inputs[7:0];   7'h31: rd = inputs[15:8];
+    7'h32: rd = inputs[23:16]; 7'h33: rd = inputs[31:24];
+    7'h34: rd = inputs[39:32]; 7'h35: rd = inputs[47:40];
+    7'h36: rd = inputs[55:48]; 7'h37: rd = inputs[63:56];
+    7'h38: rd = in_updates;
     default: rd = 8'd0;
   endcase
 end

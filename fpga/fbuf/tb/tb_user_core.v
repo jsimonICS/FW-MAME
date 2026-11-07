@@ -94,26 +94,42 @@ task send_frame(input integer bb, input [7:0] seed);
   end
 endtask
 
-// ---- UART status bytes from the FPGA (6.25 Mbaud = 160 ns per bit) ----
-reg [7:0] st_last = 8'h00;
-integer   st_count = 0;
+// ---- UART packets from the FPGA (6.25 Mbaud = 160 ns per bit) ----
+// 11 bytes: status (bit 7 set), then 10 x 7 input bits. st_last / st_count
+// update when a whole packet has arrived; pk_inputs holds its 64 input bits.
+reg [7:0]  st_last = 8'h00, st_cur = 8'h00;
+integer    st_count = 0, pk_n = -1, pk_bad = 0;
+reg [69:0] pk_bits = 70'd0;
+reg [63:0] pk_inputs = 64'd0;
 always @(negedge cm0_out[0]) begin : uart_rx
   reg [7:0] b;
   integer k;
   #(160_000 + 80_000);
   for (k = 0; k < 8; k = k + 1) begin b[k] = cm0_out[0]; #(160_000); end
-  if (cm0_out[0] !== 1'b1) begin errors = errors + 1; $display("FAIL: status stop bit"); end
-  st_last = b;
-  st_count = st_count + 1;
+  if (cm0_out[0] !== 1'b1) begin errors = errors + 1; $display("FAIL: packet stop bit"); end
+  if (b[7]) begin
+    if (pk_n >= 0 && pk_n != 10) pk_bad = pk_bad + 1;     // previous packet cut short
+    st_cur = b; pk_n = 0;
+  end else if (pk_n >= 0 && pk_n < 10) begin
+    pk_bits[pk_n * 7 +: 7] = b[6:0];
+    pk_n = pk_n + 1;
+    if (pk_n == 10) begin
+      pk_inputs = pk_bits[63:0];
+      st_last = st_cur;
+      st_count = st_count + 1;
+    end
+  end else begin
+    pk_bad = pk_bad + 1;                                   // data byte outside a packet
+  end
 end
 
-// wait until a status byte shows front == want (or time out)
-task wait_front(input want, input integer max_bytes);
+// wait until a packet shows front == want (or time out)
+task wait_front(input want, input integer max_packets);
   integer start;
   begin
     start = st_count;
-    while (st_last[7] !== want && st_count - start < max_bytes) @(st_count);
-    check(st_last[7] === want, "status byte shows the flip");
+    while (st_last[6] !== want && st_count - start < max_packets) @(st_count);
+    check(st_last[6] === want, "status packet shows the flip");
   end
 endtask
 
@@ -172,7 +188,7 @@ initial begin
   rst_n = 1'b1;
   repeat (4) @(posedge clk);
 
-  rreg(7'h12, v8); check(v8 == 8'd1, "revision");
+  rreg(7'h12, v8); check(v8 == 8'd2, "revision");
   rreg(7'h18, v8); check(v8 == 8'd0, "WIDTH reset low byte (256)");
   rreg(7'h19, v8); check(v8 == 8'd1, "WIDTH reset high byte (256)");
   rreg(7'h20, v8); check(v8 == 8'd5, "CPP reset");
@@ -243,6 +259,18 @@ initial begin
   wait_field_start;                  // takes effect at the next field
   check_field("test ramp");
   wreg(7'h10, 8'h00); ramp_mode = 1'b0;
+
+  // ---- inputs: staged until 0x37 is written, then in every packet ----
+  for (i = 0; i < 7; i = i + 1) wreg(7'h30 + i, 8'h11 * (i + 1));
+  rreg(7'h30, v8); check(v8 == 8'h00, "inputs not committed before 0x37");
+  wreg(7'h37, 8'hA5);
+  rreg(7'h30, v8); check(v8 == 8'h11, "input byte 0 committed");
+  rreg(7'h38, v8); check(v8 == 8'd1, "input update counter");
+  j = st_count;
+  while (st_count < j + 2) @(st_count);                    // a whole packet sent after the commit
+  check(pk_inputs == 64'hA577665544332211, "inputs arrive in the packet");
+  $display("  packet inputs %016h, status %02h", pk_inputs, st_last);
+  check(pk_bad == 0, "packets well formed");
 
   // ---- counters ----
   wreg(7'h11, 8'h02);
