@@ -1,0 +1,3 @@
+# Files that run on the CM0 (Linux) keep LF endings
+cm0/** text eol=lf
+*.sh text eol=lf
