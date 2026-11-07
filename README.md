@@ -8,10 +8,12 @@ The plan:
   plus composite sync on the 20-pin header. It's the same signal, pins and
   resistor ladder board as [FW-TPG](https://github.com/jsimonICS/FW-TPG).
 
-Status: **milestone 1 (link test) is done on hardware** (2026-11-07). The CM0
-pin map is known. SPI is error-free up to 12.5 MHz, and the UART works both
-ways at 7.8125 Mbaud. Full results:
-[docs/linktest-results.md](docs/linktest-results.md).
+Status: **milestones 1 (link test) and 2 (fast link) are done on hardware**
+(2026-11-07). The CM0 pin map is known. With an FPGA receiver clocked by the
+CM0's SCLK and a C sender, SPI carries **8.24 MB/s error-free at 66.7 MHz**,
+2.4× what raw 8-bit frames need. Full results:
+[docs/linktest-results.md](docs/linktest-results.md),
+[docs/fastlink-results.md](docs/fastlink-results.md).
 
 ## How it fits together
 
@@ -60,13 +62,20 @@ FPGA.
   | CM0_RX0 (out 0) | 15 | UART RXD |
   | CM0_CTS0 (out 1) | 16 (not tested) | UART CTS |
 
-- **Measured link speeds:**
-  - **SPI:** error-free up to 12.5 MHz (1.56 MB/s on the wire), fails at
-    16 MHz.
-  - **UART:** clean CM0 → FPGA at 7.8125 Mbaud. FPGA → CM0 delivered 762 KB/s
-    with 204 dropped bytes in 2.3 MB.
-  - **The CM0 sender is the bottleneck:** Python spidev with 4 KB writes
-    managed only 0.62 MB/s at 12.5 MHz.
+- **Measured link speeds** ([fpga/fastlink](fpga/fastlink),
+  [cm0/fastlink.c](cm0/fastlink.c)):
+  - **SPI:** error-free up to 66.7 MHz, 8.24 MB/s sustained as counted by the
+    FPGA. It fails at 100 MHz, and the CM0 offers nothing in between
+    (400 MHz core / even divider). The C sender with 64 KB transfers keeps the
+    wire 99-100% busy.
+  - **UART:** 0.78 MB/s CM0 → FPGA, clean even alongside SPI. FPGA → CM0
+    needs RTS/CTS: without it the CM0 drops bytes, with it 643 KB/s and no
+    errors.
+  - **The SPI clock follows the CM0's core clock,** which drops to 287.5 MHz
+    at idle under the `ondemand` governor. Pin it at 400 MHz (performance
+    governor or `core_freq_min=400`) for a steady rate.
+  - Milestone 1's oversampling receiver stopped at 12.5 MHz, and its Python
+    sender reached only 40-50% of the wire rate.
 - **Reaching the CM0 over USB** (the usual way, see
   [Reaching the CM0](#reaching-the-cm0)): the CM0's USB port shows up on the
   PC as a network adapter and a COM port, through the FW2's internal hub. SSH
@@ -101,25 +110,26 @@ A typical arcade frame is 256 × 224 at 60 fps:
 
 | Format | Needed | Fits over |
 |---|---|---|
-| 8 bits per pixel, raw | 3.4 MB/s | SPI at about 28 MHz |
-| 4 bits per pixel (16-color palette), raw | 1.7 MB/s | SPI at about 14 MHz |
-| Changed lines only | Depends on the game, usually far less | Possibly the stock 7 MHz SPI (0.875 MB/s) |
+| 8 bits per pixel, raw | 3.4 MB/s | SPI at 28.6 MHz or more |
+| 4 bits per pixel (16-color palette), raw | 1.7 MB/s | SPI at 16.7 MHz or more |
+| Changed lines only | Depends on the game, usually far less | Any of the above |
 
-Measured today, SPI at 12.5 MHz plus the UART carry 2.34 MB/s on the wire.
-That's enough for 4-bit raw frames, but only if the CM0 sender keeps the
-wires busy.
+Measured: SPI alone sustains 6.2 MB/s at 50 MHz and 8.24 MB/s at 66.7 MHz,
+so raw 8-bit frames fit with room to spare and frame compression is
+optional. The plan is 40-50 MHz for margin.
 
 ## Milestones
 
 1. **Link test** ([fpga/linktest](fpga/linktest)): map the CM0 GPIOs to FPGA
    nets, then measure SPI and UART in both directions. *Done, see
    [docs/linktest-results.md](docs/linktest-results.md).*
-2. **Fast link:**
-   - A faster CM0 sender: larger spidev transfers or C. Today's Python sender
-     reaches only 40-50% of the wire rate.
-   - An FPGA receiver clocked by SCLK itself, to go past 12.5 MHz.
-   - The goal is at least 1.7 MB/s sustained, ideally 3.4 MB/s, possibly
-     with SPI and UART together.
+2. **Fast link** ([fpga/fastlink](fpga/fastlink),
+   [cm0/fastlink.c](cm0/fastlink.c)): an FPGA receiver clocked by SCLK and a
+   C sender. The goal was at least 1.7 MB/s, ideally 3.4 MB/s. *Done:
+   8.24 MB/s error-free, see
+   [docs/fastlink-results.md](docs/fastlink-results.md).* Along the way the
+   CM0 got a USB network link ([cm0/usbnet](cm0/usbnet)) that works while our
+   designs are loaded.
 3. **Framebuffer:** SPRAM double buffer, palette and RGB333 timing (ported
    from FW-TPG), with a CM0 tool that sends test images.
 4. **Inputs:** a display app that writes buttons and analog input to FPGA
@@ -136,6 +146,9 @@ wires busy.
 | [cm0/linktest.py](cm0/linktest.py) | CM0 side of the link test (pin mapping, SPI and UART senders) |
 | [cm0/linktest_job.py](cm0/linktest_job.py), [host/linktest_run.py](host/linktest_run.py) | Unattended full run, CM0 and PC sides |
 | [host/linkstat.py](host/linkstat.py) | PC side: reads and controls the design through MAIN |
+| [fpga/fastlink](fpga/fastlink) | Fast-link FPGA design (SCLK-clocked SPI receiver) and testbench |
+| [cm0/fastlink.c](cm0/fastlink.c) | CM0 sender and UART receiver for the fast link test (C) |
+| [host/fastlink_run.py](host/fastlink_run.py), [host/faststat.py](host/faststat.py) | Full fast-link run over SSH + MAIN; reads and controls the design |
 | [host/cm0sh.py](host/cm0sh.py), [host/cm0put.py](host/cm0put.py) | Shell commands and file copies to the CM0 through MAIN (fallback) |
 | [cm0/usbnet](cm0/usbnet), [cm0/usbnet_test.sh](cm0/usbnet_test.sh) | CM0 USB port as network + COM port (permanent install, live test) |
 | [docs](docs) | Results |
@@ -197,6 +210,23 @@ no known password, but the COM port shell is already logged in):
 ssh -i ~/.ssh/fw2_cm0 pi@10.12.194.1
 scp -i ~/.ssh/fw2_cm0 cm0/fastlink.c pi@10.12.194.1:/tmp/
 ```
+
+## Running the fast link test
+
+With the CM0 on its USB network and an SSH key for `pi`, one PC script does
+everything. It compiles the sender on the CM0, stops `fwcm0-bridge`, pins the
+governor, reloads spidev with 64 KB buffers, loads `fastlink`, and runs every
+step. Afterwards it restores the stock gateware, the governor and the bridge.
+About 3.5 minutes.
+
+```sh
+(cd wilifpga && tools/fwfpga build fastlink && tools/fwfpga --port COM14 install fastlink)
+python host/fastlink_run.py --port COM14 --log docs/fastlink-run.txt
+```
+
+By hand, on the CM0: `sudo /tmp/fastlink send --hz 50000000 --lfsr` (add
+`--uart` for both links). On the PC: `python host/faststat.py pattern 0x07`
+first, then `python host/faststat.py show`.
 
 ## Running the link test
 

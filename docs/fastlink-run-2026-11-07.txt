@@ -1,0 +1,155 @@
+[   5.7] CM0: fastlink compiled. 6.12.75+rpt-rpi-v8
+frequency(1)=287500000 frequency(48)=700074000
+[  10.4] CM0: bridge stopped, governor ondemand -> performance, spidev bufsiz 65536
+[  14.1] load: [h\f\l 0D415AD248231AE0 1660 17996 1 1 267 1]
+[  15.3] CM0 still reachable with fastlink loaded: raspberrypi
+[  25.3] --- SPI 12.5 MHz, 4 KB transfers
+CM0: SPI 12.50 MHz requested, chunk 4096 (bufsiz 65536), cs burst, lfsr: sent 3076096 bytes in 2.001 s = 1.537 MB/s (98% of 1.562 MB/s)
+result spi_bytes=3076096 spi_secs=2.0015 uart_bytes=0 uart_secs=0.0000
+FPGA:
+SPI   3076096 bytes, 0 sequence errors, 1 CS bursts, 1.537 MB/s first to last byte, longest gap 65.6 us, last C1 (lfsr, CS)
+UART  0 bytes, 0 sequence errors, 0 framing errors, 0.0 KB/s, last 00 (lfsr)
+to CM0: UART TX off, 0 bytes sent (lfsr), CTS_n 0, inputs 11100
+[  35.3] --- SPI 12.5 MHz
+CM0: SPI 12.50 MHz requested, chunk 65536 (bufsiz 65536), cs burst, lfsr: sent 3145728 bytes in 2.018 s = 1.559 MB/s (100% of 1.562 MB/s)
+result spi_bytes=3145728 spi_secs=2.0176 uart_bytes=0 uart_secs=0.0000
+FPGA:
+SPI   3145728 bytes, 0 sequence errors, 1 CS bursts, 1.560 MB/s first to last byte, longest gap 84.5 us, last A1 (lfsr, CS)
+UART  0 bytes, 0 sequence errors, 0 framing errors, 0.0 KB/s, last 00 (lfsr)
+to CM0: UART TX off, 0 bytes sent (lfsr), CTS_n 0, inputs 11100
+[  45.3] --- SPI 16.7 MHz
+CM0: SPI 16.67 MHz requested, chunk 65536 (bufsiz 65536), cs burst, lfsr: sent 4194304 bytes in 2.019 s = 2.077 MB/s (100% of 2.083 MB/s)
+result spi_bytes=4194304 spi_secs=2.0190 uart_bytes=0 uart_secs=0.0000
+FPGA:
+SPI   4194304 bytes, 0 sequence errors, 1 CS bursts, 2.078 MB/s first to last byte, longest gap 83.8 us, last 40 (lfsr, CS)
+UART  0 bytes, 0 sequence errors, 0 framing errors, 0.0 KB/s, last 00 (lfsr)
+to CM0: UART TX off, 0 bytes sent (lfsr), CTS_n 0, inputs 11100
+[  55.4] --- SPI 20 MHz
+CM0: SPI 20.00 MHz requested, chunk 65536 (bufsiz 65536), cs burst, lfsr: sent 5046272 bytes in 2.025 s = 2.492 MB/s (100% of 2.500 MB/s)
+result spi_bytes=5046272 spi_secs=2.0254 uart_bytes=0 uart_secs=0.0000
+FPGA:
+SPI   5046272 bytes, 0 sequence errors, 1 CS bursts, 2.492 MB/s first to last byte, longest gap 82.6 us, last 58 (lfsr, CS)
+UART  0 bytes, 0 sequence errors, 0 framing errors, 0.0 KB/s, last 00 (lfsr)
+to CM0: UART TX off, 0 bytes sent (lfsr), CTS_n 0, inputs 11100
+[  65.3] --- SPI 25 MHz
+CM0: SPI 25.00 MHz requested, chunk 65536 (bufsiz 65536), cs burst, lfsr: sent 6225920 bytes in 2.001 s = 3.112 MB/s (100% of 3.125 MB/s)
+result spi_bytes=6225920 spi_secs=2.0007 uart_bytes=0 uart_secs=0.0000
+FPGA:
+SPI   6225920 bytes, 0 sequence errors, 1 CS bursts, 3.113 MB/s first to last byte, longest gap 76.9 us, last 6C (lfsr, CS)
+UART  0 bytes, 0 sequence errors, 0 framing errors, 0.0 KB/s, last 00 (lfsr)
+to CM0: UART TX off, 0 bytes sent (lfsr), CTS_n 0, inputs 11100
+[  75.3] --- SPI 28.6 MHz
+CM0: SPI 28.57 MHz requested, chunk 65536 (bufsiz 65536), cs burst, lfsr: sent 7143424 bytes in 2.010 s = 3.554 MB/s (100% of 3.571 MB/s)
+result spi_bytes=7143424 spi_secs=2.0100 uart_bytes=0 uart_secs=0.0000
+FPGA:
+SPI   7143424 bytes, 0 sequence errors, 1 CS bursts, 3.555 MB/s first to last byte, longest gap 90.2 us, last 2C (lfsr, CS)
+UART  0 bytes, 0 sequence errors, 0 framing errors, 0.0 KB/s, last 00 (lfsr)
+to CM0: UART TX off, 0 bytes sent (lfsr), CTS_n 0, inputs 11100
+[  85.3] --- SPI 33.3 MHz
+CM0: SPI 33.33 MHz requested, chunk 65536 (bufsiz 65536), cs burst, lfsr: sent 8323072 bytes in 2.009 s = 4.143 MB/s (99% of 4.167 MB/s)
+result spi_bytes=8323072 spi_secs=2.0087 uart_bytes=0 uart_secs=0.0000
+FPGA:
+SPI   8323072 bytes, 0 sequence errors, 1 CS bursts, 4.145 MB/s first to last byte, longest gap 81.2 us, last 36 (lfsr, CS)
+UART  0 bytes, 0 sequence errors, 0 framing errors, 0.0 KB/s, last 00 (lfsr)
+to CM0: UART TX off, 0 bytes sent (lfsr), CTS_n 0, inputs 11100
+[  95.5] --- SPI 40 MHz
+CM0: SPI 40.00 MHz requested, chunk 65536 (bufsiz 65536), cs burst, lfsr: sent 9961472 bytes in 2.006 s = 4.967 MB/s (99% of 5.000 MB/s)
+result spi_bytes=9961472 spi_secs=2.0057 uart_bytes=0 uart_secs=0.0000
+FPGA:
+SPI   9961472 bytes, 0 sequence errors, 1 CS bursts, 4.968 MB/s first to last byte, longest gap 83.8 us, last 26 (lfsr, CS)
+UART  0 bytes, 0 sequence errors, 0 framing errors, 0.0 KB/s, last 00 (lfsr)
+to CM0: UART TX off, 0 bytes sent (lfsr), CTS_n 0, inputs 11100
+[ 105.3] --- SPI 50 MHz
+CM0: SPI 50.00 MHz requested, chunk 65536 (bufsiz 65536), cs burst, lfsr: sent 12451840 bytes in 2.009 s = 6.198 MB/s (99% of 6.250 MB/s)
+result spi_bytes=12451840 spi_secs=2.0090 uart_bytes=0 uart_secs=0.0000
+FPGA:
+SPI   12451840 bytes, 0 sequence errors, 1 CS bursts, 6.200 MB/s first to last byte, longest gap 86.0 us, last 5F (lfsr, CS)
+UART  0 bytes, 0 sequence errors, 0 framing errors, 0.0 KB/s, last 00 (lfsr)
+to CM0: UART TX off, 0 bytes sent (lfsr), CTS_n 0, inputs 11100
+[ 115.4] --- SPI 66.7 MHz
+CM0: SPI 66.67 MHz requested, chunk 65536 (bufsiz 65536), cs burst, lfsr: sent 16515072 bytes in 2.004 s = 8.240 MB/s (99% of 8.333 MB/s)
+result spi_bytes=16515072 spi_secs=2.0043 uart_bytes=0 uart_secs=0.0000
+FPGA:
+SPI   16515072 bytes, 0 sequence errors, 1 CS bursts, 8.242 MB/s first to last byte, longest gap 94.8 us, last 2F (lfsr, CS)
+UART  0 bytes, 0 sequence errors, 0 framing errors, 0.0 KB/s, last 00 (lfsr)
+to CM0: UART TX off, 0 bytes sent (lfsr), CTS_n 0, inputs 11100
+[ 125.5] --- SPI 100 MHz
+CM0: SPI 100.00 MHz requested, chunk 65536 (bufsiz 65536), cs burst, lfsr: sent 24641536 bytes in 2.005 s = 12.290 MB/s (98% of 12.500 MB/s)
+result spi_bytes=24641536 spi_secs=2.0051 uart_bytes=0 uart_secs=0.0000
+FPGA:
+SPI   24641536 bytes, 24565129 sequence errors, 1 CS bursts, 12.293 MB/s first to last byte, longest gap 70.9 us, last 0E (lfsr, CS)
+UART  0 bytes, 0 sequence errors, 0 framing errors, 0.0 KB/s, last 00 (lfsr)
+to CM0: UART TX off, 0 bytes sent (lfsr), CTS_n 0, inputs 11100
+[ 135.5] --- SPI 25 MHz, CS per 64 KB transfer
+CM0: SPI 25.00 MHz requested, chunk 65536 (bufsiz 65536), cs xfer, lfsr: sent 6225920 bytes in 2.001 s = 3.112 MB/s (100% of 3.125 MB/s)
+result spi_bytes=6225920 spi_secs=2.0007 uart_bytes=0 uart_secs=0.0000
+FPGA:
+SPI   6225920 bytes, 0 sequence errors, 95 CS bursts, 3.113 MB/s first to last byte, longest gap 75.2 us, last 6C (lfsr, CS)
+UART  0 bytes, 0 sequence errors, 0 framing errors, 0.0 KB/s, last 00 (lfsr)
+to CM0: UART TX off, 0 bytes sent (lfsr), CTS_n 0, inputs 11100
+[ 145.6] --- SPI 25 MHz, no CS
+CM0: SPI 25.00 MHz requested, chunk 65536 (bufsiz 65536), cs none, lfsr: sent 6225920 bytes in 2.001 s = 3.112 MB/s (100% of 3.125 MB/s)
+result spi_bytes=6225920 spi_secs=2.0007 uart_bytes=0 uart_secs=0.0000
+FPGA:
+SPI   6225920 bytes, 0 sequence errors, 0 CS bursts, 3.113 MB/s first to last byte, longest gap 83.0 us, last 6C (lfsr, no CS)
+UART  0 bytes, 0 sequence errors, 0 framing errors, 0.0 KB/s, last 00 (lfsr)
+to CM0: UART TX off, 0 bytes sent (lfsr), CTS_n 0, inputs 11100
+[ 155.6] --- SPI 25 MHz + UART
+CM0: SPI 25.00 MHz requested, chunk 65536 (bufsiz 65536), cs burst, lfsr: sent 6225920 bytes in 2.003 s = 3.109 MB/s (99% of 3.125 MB/s)
+UART 7812500 baud, lfsr: sent 1572864 bytes in 2.020 s = 778.7 KB/s
+result spi_bytes=6225920 spi_secs=2.0027 uart_bytes=1572864 uart_secs=2.0199
+FPGA:
+SPI   6225920 bytes, 0 sequence errors, 1 CS bursts, 3.110 MB/s first to last byte, longest gap 101.9 us, last 6C (lfsr, CS)
+UART  1572864 bytes, 0 sequence errors, 0 framing errors, 781.4 KB/s, last A9 (lfsr)
+to CM0: UART TX off, 0 bytes sent (lfsr), CTS_n 0, inputs 11100
+[ 165.6] --- SPI 40 MHz + UART
+CM0: SPI 40.00 MHz requested, chunk 65536 (bufsiz 65536), cs burst, lfsr: sent 9961472 bytes in 2.009 s = 4.958 MB/s (99% of 5.000 MB/s)
+UART 7812500 baud, lfsr: sent 1576960 bytes in 2.024 s = 779.0 KB/s
+result spi_bytes=9961472 spi_secs=2.0090 uart_bytes=1576960 uart_secs=2.0243
+FPGA:
+SPI   9961472 bytes, 0 sequence errors, 1 CS bursts, 4.960 MB/s first to last byte, longest gap 101.5 us, last 26 (lfsr, CS)
+UART  1576960 bytes, 0 sequence errors, 0 framing errors, 781.4 KB/s, last 5D (lfsr)
+to CM0: UART TX off, 0 bytes sent (lfsr), CTS_n 0, inputs 11100
+[ 175.6] --- UART CM0 -> FPGA
+CM0: UART 7812500 baud, lfsr: sent 1568768 bytes in 2.014 s = 778.9 KB/s
+result spi_bytes=0 spi_secs=0.0000 uart_bytes=1568768 uart_secs=2.0141
+FPGA:
+SPI   0 bytes, 0 sequence errors, 0 CS bursts, 0.000 MB/s first to last byte, longest gap 0.0 us, last 00 (lfsr, CS)
+UART  1568768 bytes, 0 sequence errors, 0 framing errors, 781.4 KB/s, last BA (lfsr)
+to CM0: UART TX off, 0 bytes sent (lfsr), CTS_n 0, inputs 11100
+[ 187.3] --- UART FPGA -> CM0, no flow control
+CM0: UART RX 7812500 baud, lfsr: 2263031 bytes in 3.00 s = 754.3 KB/s, 50513 sequence errors
+result rx_bytes=2263031 rx_errs=50513
+FPGA:
+SPI   0 bytes, 0 sequence errors, 0 CS bursts, 0.000 MB/s first to last byte, longest gap 0.0 us, last 00 (lfsr, CS)
+UART  0 bytes, 0 sequence errors, 0 framing errors, 0.0 KB/s, last 00 (lfsr)
+to CM0: UART TX off, 3670433 bytes sent (lfsr), CTS_n 0, inputs 11100
+[ 199.1] --- UART FPGA -> CM0, RTS/CTS
+CM0: UART RX 7812500 baud rtscts, lfsr: 1929049 bytes in 3.00 s = 643.0 KB/s, 0 sequence errors
+result rx_bytes=1929049 rx_errs=0
+FPGA:
+SPI   0 bytes, 0 sequence errors, 0 CS bursts, 0.000 MB/s first to last byte, longest gap 0.0 us, last 00 (lfsr, CS)
+UART  0 bytes, 0 sequence errors, 0 framing errors, 0.0 KB/s, last 00 (lfsr)
+to CM0: UART TX off, waits for RTS, 1929114 bytes sent (lfsr), CTS_n 0, inputs 11100
+[ 202.9] restore: [h\f\t 0D415AFE390C9DE8 1862 Ok 1]
+[ 204.4] CM0: governor restored, bridge started
+[ 204.4] 
+step                                 CM0 sent    FPGA got   errors   MB/s  gap us | UART sent   got  errors  KB/s
+[ 204.4] SPI 12.5 MHz, 4 KB transfers           3076096    3076096        0  1.537    65.6 |         0        0      0     0
+[ 204.4] SPI 12.5 MHz                           3145728    3145728        0  1.560    84.5 |         0        0      0     0
+[ 204.4] SPI 16.7 MHz                           4194304    4194304        0  2.078    83.8 |         0        0      0     0
+[ 204.4] SPI 20 MHz                             5046272    5046272        0  2.492    82.6 |         0        0      0     0
+[ 204.4] SPI 25 MHz                             6225920    6225920        0  3.113    76.9 |         0        0      0     0
+[ 204.4] SPI 28.6 MHz                           7143424    7143424        0  3.555    90.2 |         0        0      0     0
+[ 204.4] SPI 33.3 MHz                           8323072    8323072        0  4.145    81.2 |         0        0      0     0
+[ 204.4] SPI 40 MHz                             9961472    9961472        0  4.968    83.8 |         0        0      0     0
+[ 204.4] SPI 50 MHz                            12451840   12451840        0  6.200    86.0 |         0        0      0     0
+[ 204.4] SPI 66.7 MHz                          16515072   16515072        0  8.242    94.8 |         0        0      0     0
+[ 204.4] SPI 100 MHz                           24641536   24641536 24565129 12.293    70.9 |         0        0      0     0
+[ 204.4] SPI 25 MHz, CS per 64 KB transfer      6225920    6225920        0  3.113    75.2 |         0        0      0     0
+[ 204.4] SPI 25 MHz, no CS                      6225920    6225920        0  3.113    83.0 |         0        0      0     0
+[ 204.4] SPI 25 MHz + UART                      6225920    6225920        0  3.110   101.9 |   1572864  1572864      0   781
+[ 204.4] SPI 40 MHz + UART                      9961472    9961472        0  4.960   101.5 |   1576960  1576960      0   781
+[ 204.4] UART CM0 -> FPGA                             0          0        0  0.000     0.0 |   1568768  1568768      0   781
+[ 204.4] UART FPGA -> CM0, no flow control            (CM0 got 2263031, 50513 errors) | FPGA sent 3670433
+[ 204.4] UART FPGA -> CM0, RTS/CTS                        (CM0 got 1929049, 0 errors) | FPGA sent 1929114
