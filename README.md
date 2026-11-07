@@ -67,16 +67,19 @@ FPGA.
     with 204 dropped bytes in 2.3 MB.
   - **The CM0 sender is the bottleneck:** Python spidev with 4 KB writes
     managed only 0.62 MB/s at 12.5 MHz.
-- **Reaching the CM0 without network or USB:** MAIN's Linux menu (`l\c`,
+- **Reaching the CM0 over USB** (the usual way, see
+  [Reaching the CM0](#reaching-the-cm0)): the CM0's USB port shows up on the
+  PC as a network adapter and a COM port, through the FW2's internal hub. SSH
+  and scp work at 10.12.194.1, about 16 MB/s. This doesn't go through the
+  FPGA, so it keeps working while our designs are loaded.
+- **Reaching the CM0 through MAIN** (fallback): MAIN's Linux menu (`l\c`,
   `l\w`, `l\r`, `l\e`) gives a bash session through the stock FPGA's mailbox.
   [host/cm0sh.py](host/cm0sh.py) runs commands that way, and
-  [host/cm0put.py](host/cm0put.py) copies files.
+  [host/cm0put.py](host/cm0put.py) copies files at about 1 KB/s.
 - **Loading our design cuts the CM0 off from MAIN.** The stock gateware
   carries the CM0's mailbox to MAIN, so while our design runs there's no
-  `fwcm0-bridge`, no GUI CM0 shell and no OneWili on the CM0. Work on the CM0
-  happens before loading, or in a detached job that restarts the bridge
-  afterwards (see [cm0/linktest_job.py](cm0/linktest_job.py)), unless the
-  CM0 has SSH or a USB gadget port. `fwfpga restore` brings the stock
+  `fwcm0-bridge`, no GUI CM0 shell, no OneWili and no MAIN Linux menu on the
+  CM0. The USB link isn't affected. `fwfpga restore` brings the stock
   gateware back.
 - **wilifpga v0.1.0 doesn't give designs the CM0 nets.** Its shell parks them,
   and its contract checks forbid a design from naming pads.
@@ -133,7 +136,8 @@ wires busy.
 | [cm0/linktest.py](cm0/linktest.py) | CM0 side of the link test (pin mapping, SPI and UART senders) |
 | [cm0/linktest_job.py](cm0/linktest_job.py), [host/linktest_run.py](host/linktest_run.py) | Unattended full run, CM0 and PC sides |
 | [host/linkstat.py](host/linkstat.py) | PC side: reads and controls the design through MAIN |
-| [host/cm0sh.py](host/cm0sh.py), [host/cm0put.py](host/cm0put.py) | Shell commands and file copies to the CM0 through MAIN |
+| [host/cm0sh.py](host/cm0sh.py), [host/cm0put.py](host/cm0put.py) | Shell commands and file copies to the CM0 through MAIN (fallback) |
+| [cm0/usbnet](cm0/usbnet), [cm0/usbnet_test.sh](cm0/usbnet_test.sh) | CM0 USB port as network + COM port (permanent install, live test) |
 | [docs](docs) | Results |
 | [patches](patches) | The wilifpga shell patch |
 | [tools/setup.py](tools/setup.py) | Applies the patch and links `fpga/*` designs into wilifpga |
@@ -151,6 +155,47 @@ python tools/setup.py          # patch wilifpga, link fpga/* into wilifpga/desig
 cd wilifpga
 tools/fwfpga sim linktest
 tools/fwfpga build linktest
+```
+
+## Reaching the CM0
+
+The FreeWili CM0 image already puts the CM0's USB controller in device mode
+(`dtoverlay=dwc2,dr_mode=peripheral`, GPIO2 low, GPIO3 high in config.txt)
+and loads `g_serial`, so out of the box the PC sees a COM port with an
+autologin `pi` shell (USB ID 0525:a4a7). [cm0/usbnet](cm0/usbnet) replaces
+`g_serial` with a composite device that is both:
+
+- **A network adapter** (RNDIS, `usb0`): the CM0 is 10.12.194.1/28 and hands
+  the PC an address in 10.12.194.2-14. Its DHCP server sends no gateway and
+  no DNS, so the PC never routes internet traffic through the CM0. Microsoft
+  OS descriptors let Windows bind an RNDIS driver without an .inf. (The test
+  PC bound Intrepid's "neoECU AVB USB RNDIS" driver; a PC without it should
+  get Windows' own RNDIS driver, not yet confirmed.)
+- **A COM port** (ACM, `ttyGS0`) with the same autologin shell (USB ID
+  1d6b:0104).
+
+Install it once, from the COM port or MAIN's Linux menu, then reboot:
+
+```sh
+# copy cm0/usbnet to the CM0 (scp, or host/cm0put.py file by file), then on the CM0:
+sudo sh usbnet/install.sh                # sudo sh usbnet/install.sh --uninstall undoes it
+sudo reboot
+```
+
+It edits only `cmdline.txt`, removing `g_serial` from `modules-load`, and
+keeps the original as `cmdline.txt.fwmame-orig`. Don't use Raspberry Pi's
+`rpi-usb-gadget` on this image: it loads `g_ether` alongside the `g_serial`
+in `cmdline.txt` (only one can own the port), and its `off` deletes the
+dwc2 line from config.txt. [cm0/usbnet_test.sh](cm0/usbnet_test.sh) runs the
+same setup live, without changing anything permanently, and reverts after
+10 minutes.
+
+For SSH, put a public key in `~pi/.ssh/authorized_keys` (the image's `pi` has
+no known password, but the COM port shell is already logged in):
+
+```sh
+ssh -i ~/.ssh/fw2_cm0 pi@10.12.194.1
+scp -i ~/.ssh/fw2_cm0 cm0/fastlink.c pi@10.12.194.1:/tmp/
 ```
 
 ## Running the link test

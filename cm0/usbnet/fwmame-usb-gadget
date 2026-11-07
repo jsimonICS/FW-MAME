@@ -1,0 +1,72 @@
+#!/bin/sh
+# fwmame-usb-gadget start|stop - the CM0's USB device port as network + serial.
+#
+# Builds a configfs composite gadget on the CM0's USB controller (dwc2 in
+# peripheral mode, set up by the FreeWili image's config.txt):
+#   - RNDIS network, interface usb0, 10.12.194.1/28. Microsoft OS descriptors
+#     let Windows bind an RNDIS driver without an .inf.
+#   - ACM serial, /dev/ttyGS0, which keeps the image's autologin console
+#     (serial-getty@ttyGS0) as a COM port on the PC.
+# It replaces the image's g_serial module (only one gadget can own the port).
+# Run by fwmame-usb-gadget.service; DHCP for the PC is fwmame-usb-dhcp.service.
+set -e
+G=/sys/kernel/config/usb_gadget/fwmame
+ADDR=10.12.194.1/28
+
+stop() {
+  [ -d $G ] || return 0
+  echo "" > $G/UDC 2>/dev/null || true
+  rm -f $G/os_desc/c.1 $G/configs/c.1/rndis.usb0 $G/configs/c.1/acm.usb0
+  rmdir $G/configs/c.1/strings/0x409 $G/configs/c.1 \
+        $G/functions/rndis.usb0 $G/functions/acm.usb0 $G/strings/0x409 $G
+}
+
+start() {
+  modprobe -r g_serial 2>/dev/null || true
+  modprobe libcomposite
+  mountpoint -q /sys/kernel/config || mount -t configfs none /sys/kernel/config
+  stop
+  mkdir -p $G
+  cd $G
+  echo 0x1d6b > idVendor                  # Linux Foundation
+  echo 0x0104 > idProduct                 # Multifunction Composite Gadget
+  echo 0x0100 > bcdDevice
+  echo 0x0200 > bcdUSB
+  echo 0xEF > bDeviceClass                # composite with interface association descriptors
+  echo 0x02 > bDeviceSubClass
+  echo 0x01 > bDeviceProtocol
+  mkdir -p strings/0x409
+  echo "fwmame-cm0" > strings/0x409/serialnumber
+  echo "FW-MAME" > strings/0x409/manufacturer
+  echo "FW2 CM0 USB network + serial" > strings/0x409/product
+  mkdir -p configs/c.1/strings/0x409
+  echo "RNDIS + ACM" > configs/c.1/strings/0x409/configuration
+  echo 250 > configs/c.1/MaxPower
+  echo 1 > os_desc/use
+  echo 0xcd > os_desc/b_vendor_code
+  echo MSFT100 > os_desc/qw_sign
+  mkdir -p functions/rndis.usb0
+  echo 02:46:57:4d:00:01 > functions/rndis.usb0/host_addr   # fixed MACs: Windows keeps one adapter
+  echo 02:46:57:4d:00:02 > functions/rndis.usb0/dev_addr
+  if [ -e functions/rndis.usb0/class ]; then
+    echo ef > functions/rndis.usb0/class
+    echo 04 > functions/rndis.usb0/subclass
+    echo 01 > functions/rndis.usb0/protocol
+  fi
+  echo RNDIS > functions/rndis.usb0/os_desc/interface.rndis/compatible_id
+  echo 5162001 > functions/rndis.usb0/os_desc/interface.rndis/sub_compatible_id
+  mkdir -p functions/acm.usb0
+  ln -s functions/rndis.usb0 configs/c.1/  # RNDIS first: Windows expects it
+  ln -s functions/acm.usb0 configs/c.1/
+  ln -s configs/c.1 os_desc/
+  ls /sys/class/udc | head -n 1 > UDC
+  for _ in 1 2 3 4 5 6 7 8 9 10; do [ -e /sys/class/net/usb0 ] && break; sleep 0.5; done
+  ip addr replace $ADDR dev usb0
+  ip link set usb0 up
+}
+
+case "$1" in
+  start) start ;;
+  stop)  stop ;;
+  *) echo "usage: $0 start|stop" >&2; exit 2 ;;
+esac

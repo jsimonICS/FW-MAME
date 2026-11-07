@@ -1,0 +1,16 @@
+[Unit]
+Description=FW-MAME USB network: DHCP for the PC on usb0 (no gateway, no DNS)
+Requires=fwmame-usb-gadget.service
+After=fwmame-usb-gadget.service
+
+[Service]
+# The PC gets 10.12.194.2-14. Options 3 and 6 are sent empty, so the PC
+# never routes its internet traffic or DNS through the CM0.
+ExecStart=/usr/sbin/dnsmasq --keep-in-foreground --conf-file=/dev/null --port=0 \
+  --interface=usb0 --bind-dynamic --dhcp-authoritative \
+  --dhcp-range=10.12.194.2,10.12.194.14,255.255.255.240,1h \
+  --dhcp-option=3 --dhcp-option=6 --dhcp-leasefile=/run/fwmame-usb.leases
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

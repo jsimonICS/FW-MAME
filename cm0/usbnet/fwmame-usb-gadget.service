@@ -1,0 +1,15 @@
+[Unit]
+Description=FW-MAME USB gadget: RNDIS network (usb0) + ACM serial (ttyGS0)
+After=sys-kernel-config.mount systemd-modules-load.service
+Before=getty.target network-pre.target
+Wants=network-pre.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/fwmame-usb-gadget start
+ExecStartPost=-/bin/systemctl --no-block restart serial-getty@ttyGS0.service
+ExecStop=/usr/local/sbin/fwmame-usb-gadget stop
+
+[Install]
+WantedBy=multi-user.target
