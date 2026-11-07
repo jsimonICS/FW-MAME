@@ -12,7 +12,7 @@ reg  [6:0] reg_addr = 7'd0;
 reg  [7:0] reg_wdata = 8'd0;
 reg        reg_wr = 1'b0;
 wire [7:0] reg_rdata;
-reg  [4:0] cm0_in = 5'b00100;        // UART line idles high
+reg  [4:0] cm0_in = 5'b01000;        // UART line (input 3) idles high
 wire [1:0] cm0_out;
 wire [9:0] hdr_out, hdr_oe, rp_out;
 wire       fifo_tx_ready, fifo_rx_valid;
@@ -67,13 +67,13 @@ task spi_byte(input [7:0] b, input integer half_ps);
   end
 endtask
 
-// UART 8N1 on cm0_in[2], LSB first.
+// UART 8N1 on cm0_in[3], LSB first.
 task uart_byte(input [7:0] b, input integer bit_ps);
   integer i;
   begin
-    cm0_in[2] = 1'b0; #(bit_ps);
-    for (i = 0; i < 8; i = i + 1) begin cm0_in[2] = b[i]; #(bit_ps); end
-    cm0_in[2] = 1'b1; #(bit_ps);
+    cm0_in[3] = 1'b0; #(bit_ps);
+    for (i = 0; i < 8; i = i + 1) begin cm0_in[3] = b[i]; #(bit_ps); end
+    cm0_in[3] = 1'b1; #(bit_ps);
   end
 endtask
 
@@ -109,9 +109,9 @@ initial begin
   // ---- edge counters: input k toggles 10*(k+1) times ----
   clear;
   for (n = 0; n < 5; n = n + 1)
-    if (n != 2)
+    if (n != 3)
       for (i = 0; i < 10 * (n + 1); i = i + 1) begin cm0_in[n] = ~cm0_in[n]; #(200_000); end
-  for (i = 0; i < 30; i = i + 1) begin cm0_in[2] = ~cm0_in[2]; #(200_000); end
+  for (i = 0; i < 40; i = i + 1) begin cm0_in[3] = ~cm0_in[3]; #(200_000); end
   snapshot;
   for (n = 0; n < 5; n = n + 1) begin
     r16(7'h10 + 2 * n, v16);
@@ -119,7 +119,7 @@ initial begin
     $display("  input %0d: %0d edges", n, v16);
   end
   rreg(7'h1A, v8); check(v8[4:0] === cm0_in, "live levels");
-  cm0_in = 5'b00100;
+  cm0_in = 5'b01000;
 
   // ---- SPI at 7 MHz (71.4 ns half period, the stock bridge rate): 600 bytes in 3 transfers ----
   clear;
@@ -166,7 +166,7 @@ initial begin
 
   // ---- UART RX framing error: stop bit low ----
   clear;
-  cm0_in[2] = 1'b0; #(10 * 4 * CLK_PS); cm0_in[2] = 1'b1; #(20 * 4 * CLK_PS);
+  cm0_in[3] = 1'b0; #(10 * 4 * CLK_PS); cm0_in[3] = 1'b1; #(20 * 4 * CLK_PS);
   snapshot;
   r16(7'h3C, v16); check(v16 == 1, "UART framing error counted");
   r32(7'h34, v32); check(v32 == 0, "no byte from a framing error");

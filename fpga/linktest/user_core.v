@@ -20,8 +20,11 @@
 // itself only reaches ~40 MHz.) Needs the FW-MAME wilifpga patch
 // ([host] cm0_link = true in design.toml adds the cm0_in / cm0_out ports).
 //
-// cm0_in bit:  0 CM0_SPI0_MISO  1 CM0_SPI0_CLK  2 CM0_RX1  3 CM0_SPI1_MISO  4 CM0_SPI1_CLK
-// cm0_out bit: 0 CM0_RX0 (UART to the CM0)      1 CM0_CTS0 (active low)
+// cm0_in bit (fw2.pcf name = CM0 GPIO, measured 2026-11-07 with this design):
+//   0 CM0_SPI0_MISO = GPIO10 SPI0 MOSI     1 CM0_SPI0_CLK  = GPIO11 SPI0 SCLK
+//   2 CM0_RX1       = GPIO17 UART RTS      3 CM0_SPI1_MISO = GPIO14 UART TXD
+//   4 CM0_SPI1_CLK  = GPIO21 software CS
+// cm0_out bit: 0 CM0_RX0 = GPIO15 UART RXD   1 CM0_CTS0 (active low, likely GPIO16 CTS)
 //
 // Registers (counters read from a snapshot taken by command bit 1, so a
 // multi-byte value is consistent; all little-endian):
@@ -35,7 +38,7 @@
 //   0x24-0x27 r   SPI bytes received (32 bits)
 //   0x28-0x2B r   SPI sequence errors (byte != previous + 1)
 //   0x2C      r   SPI last byte
-//   0x30      rw  UART RX input (bits 2:0). Reset 2.
+//   0x30      rw  UART RX input (bits 2:0). Reset 3 (the CM0's TXD).
 //   0x31      rw  UART clocks per bit, RX and TX (min 4). Reset 4 (7.8125 Mbaud).
 //   0x34-0x37 r   UART bytes received
 //   0x38-0x3B r   UART sequence errors
@@ -109,7 +112,7 @@ always @(posedge clk) begin
     ctrl     <= 2'b00;
     spi_sel  <= 8'h01;
     spi_cs   <= 8'h80;
-    uart_sel <= 8'h02;
+    uart_sel <= 8'h03;
     uart_div <= 8'd4;
   end else if (reg_wr) begin
     case (reg_addr)

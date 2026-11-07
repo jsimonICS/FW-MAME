@@ -1,7 +1,7 @@
 [design]
 name          = "linktest"
 description   = "FW-MAME link test: edge counters, SPI and UART receivers on the CM0 nets, UART back to the CM0"
-version       = "001"
+version       = "002"
 design_id     = 19531          # 0x4C4B "LK"
 kind          = "user"
 clock_hz      = 31250000       # UART at clk/4 = 7.8125 Mbaud, the CM0 stock rate

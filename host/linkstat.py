@@ -16,7 +16,9 @@ import time
 
 import serial
 
-INPUTS = ("CM0_SPI0_MISO", "CM0_SPI0_CLK", "CM0_RX1", "CM0_SPI1_MISO", "CM0_SPI1_CLK")
+# fw2.pcf net and the CM0 GPIO that drives it (measured 2026-11-07)
+INPUTS = ("CM0_SPI0_MISO=GPIO10 MOSI", "CM0_SPI0_CLK=GPIO11 SCLK", "CM0_RX1=GPIO17 RTS",
+          "CM0_SPI1_MISO=GPIO14 TXD", "CM0_SPI1_CLK=GPIO21 CS")
 
 
 class Main:
@@ -63,9 +65,9 @@ def cmd_show(dev, _args):
     at = lambda a, n=1: le(r, a - 0x10, n)
     if at(0x1D) != 1:
         sys.exit(f"revision register reads {at(0x1D)}, expected 1: is the linktest design loaded?")
-    print("input            edges  level   (edge count / 2 = CM0 GPIO after `linktest.py pins`)")
+    print("input                       edges  level   (edge count / 2 = CM0 GPIO after `linktest.py pins`)")
     for i, name in enumerate(INPUTS):
-        print(f"  {i} {name:14} {at(0x10 + 2 * i, 2):6}  {(at(0x1A) >> i) & 1}")
+        print(f"  {i} {name:25} {at(0x10 + 2 * i, 2):6}  {(at(0x1A) >> i) & 1}")
     sel, cs = at(0x20), at(0x21)
     print(f"SPI   sclk=in{sel & 7} data=in{(sel >> 4) & 7} cs={'none' if cs & 0x80 else f'in{cs & 7}'}:"
           f" {at(0x24, 4)} bytes, {at(0x28, 4)} sequence errors, last {at(0x2C):02X}")

@@ -8,8 +8,10 @@ The plan:
   plus composite sync on the 20-pin header. It's the same signal, pins and
   resistor ladder board as [FW-TPG](https://github.com/jsimonICS/FW-TPG).
 
-Status: **milestone 1 (link test)** is built and passes simulation. It hasn't
-run on hardware yet.
+Status: **milestone 1 (link test) is done on hardware** (2026-11-07). The CM0
+pin map is known. SPI is error-free up to 12.5 MHz, and the UART works both
+ways at 7.8125 Mbaud. Full results:
+[docs/linktest-results.md](docs/linktest-results.md).
 
 ## How it fits together
 
@@ -45,13 +47,37 @@ FPGA.
   The stock link sends commands on SPI0 at 7 MHz and replies on the PL011 UART
   at 7.8125 Mbaud with RTS/CTS, with chip select on GPIO21 in software
   ([wilicm0bsp](https://github.com/freewili/wilicm0bsp) `agents/hardware.md`).
-  Which CM0 GPIO drives which FPGA net isn't documented. The link test finds
-  out.
+  The link test measured which CM0 GPIO drives which net. The net names don't
+  match their functions:
+
+  | FPGA net | CM0 GPIO | Function |
+  |---|---|---|
+  | CM0_SPI0_MISO (in 0) | 10 | SPI0 MOSI |
+  | CM0_SPI0_CLK (in 1) | 11 | SPI0 SCLK |
+  | CM0_RX1 (in 2) | 17 | UART RTS |
+  | CM0_SPI1_MISO (in 3) | 14 | UART TXD |
+  | CM0_SPI1_CLK (in 4) | 21 | software CS |
+  | CM0_RX0 (out 0) | 15 | UART RXD |
+  | CM0_CTS0 (out 1) | 16 (not tested) | UART CTS |
+
+- **Measured link speeds:**
+  - **SPI:** error-free up to 12.5 MHz (1.56 MB/s on the wire), fails at
+    16 MHz.
+  - **UART:** clean CM0 → FPGA at 7.8125 Mbaud. FPGA → CM0 delivered 762 KB/s
+    with 204 dropped bytes in 2.3 MB.
+  - **The CM0 sender is the bottleneck:** Python spidev with 4 KB writes
+    managed only 0.62 MB/s at 12.5 MHz.
+- **Reaching the CM0 without network or USB:** MAIN's Linux menu (`l\c`,
+  `l\w`, `l\r`, `l\e`) gives a bash session through the stock FPGA's mailbox.
+  [host/cm0sh.py](host/cm0sh.py) runs commands that way, and
+  [host/cm0put.py](host/cm0put.py) copies files.
 - **Loading our design cuts the CM0 off from MAIN.** The stock gateware
   carries the CM0's mailbox to MAIN, so while our design runs there's no
-  `fwcm0-bridge`, no GUI CM0 shell and no OneWili on the CM0. Reach the CM0
-  over its USB gadget serial port or SSH instead. `fwfpga restore` brings
-  the stock gateware back.
+  `fwcm0-bridge`, no GUI CM0 shell and no OneWili on the CM0. Work on the CM0
+  happens before loading, or in a detached job that restarts the bridge
+  afterwards (see [cm0/linktest_job.py](cm0/linktest_job.py)), unless the
+  CM0 has SSH or a USB gadget port. `fwfpga restore` brings the stock
+  gateware back.
 - **wilifpga v0.1.0 doesn't give designs the CM0 nets.** Its shell parks them,
   and its contract checks forbid a design from naming pads.
   [patches/wilifpga-cm0-link.patch](patches/wilifpga-cm0-link.patch) passes
@@ -76,16 +102,21 @@ A typical arcade frame is 256 × 224 at 60 fps:
 | 4 bits per pixel (16-color palette), raw | 1.7 MB/s | SPI at about 14 MHz |
 | Changed lines only | Depends on the game, usually far less | Possibly the stock 7 MHz SPI (0.875 MB/s) |
 
-The stock link speeds are a starting point, not a limit. The link test
-measures the real speeds.
+Measured today, SPI at 12.5 MHz plus the UART carry 2.34 MB/s on the wire.
+That's enough for 4-bit raw frames, but only if the CM0 sender keeps the
+wires busy.
 
 ## Milestones
 
 1. **Link test** ([fpga/linktest](fpga/linktest)): map the CM0 GPIOs to FPGA
-   nets, then measure SPI and UART in both directions. *Built and simulated.*
-2. **Fast receiver:** capture SPI on the CM0's own clock instead of
-   oversampling it, to find the top SPI rate. The goal is at least 1.7 MB/s,
-   ideally 3.4 MB/s.
+   nets, then measure SPI and UART in both directions. *Done, see
+   [docs/linktest-results.md](docs/linktest-results.md).*
+2. **Fast link:**
+   - A faster CM0 sender: larger spidev transfers or C. Today's Python sender
+     reaches only 40-50% of the wire rate.
+   - An FPGA receiver clocked by SCLK itself, to go past 12.5 MHz.
+   - The goal is at least 1.7 MB/s sustained, ideally 3.4 MB/s, possibly
+     with SPI and UART together.
 3. **Framebuffer:** SPRAM double buffer, palette and RGB333 timing (ported
    from FW-TPG), with a CM0 tool that sends test images.
 4. **Inputs:** a display app that writes buttons and analog input to FPGA
@@ -100,7 +131,10 @@ measures the real speeds.
 |---|---|
 | [fpga/linktest](fpga/linktest) | Link-test FPGA design and testbench |
 | [cm0/linktest.py](cm0/linktest.py) | CM0 side of the link test (pin mapping, SPI and UART senders) |
+| [cm0/linktest_job.py](cm0/linktest_job.py), [host/linktest_run.py](host/linktest_run.py) | Unattended full run, CM0 and PC sides |
 | [host/linkstat.py](host/linkstat.py) | PC side: reads and controls the design through MAIN |
+| [host/cm0sh.py](host/cm0sh.py), [host/cm0put.py](host/cm0put.py) | Shell commands and file copies to the CM0 through MAIN |
+| [docs](docs) | Results |
 | [patches](patches) | The wilifpga shell patch |
 | [tools/setup.py](tools/setup.py) | Applies the patch and links `fpga/*` designs into wilifpga |
 | `wilifpga`, `wilicm0bsp` | Submodules: FreeWili FPGA toolkit, FreeWili CM0 BSP |
@@ -121,25 +155,47 @@ tools/fwfpga build linktest
 
 ## Running the link test
 
-Close the FreeWili GUI first, because it holds MAIN's serial port. MAIN must
-have power zone 6 (FPGA) on. Replace `COM14` with your FW2's port.
+Close the FreeWili GUI first, because it holds MAIN's serial port. Replace
+`COM14` with your FW2's port.
 
-1. **On the CM0** (USB serial or SSH), stop the bridge:
-   `sudo systemctl stop fwcm0-bridge`. Copy `cm0/linktest.py` over and
-   install `python3-spidev` and `python3-serial`.
-2. **On the PC**, from `wilifpga/`, load the design:
-   `tools/fwfpga install linktest` then `tools/fwfpga load linktest`.
+**Power up:**
+- **FPGA:** `h\p\s 6 1` turns on zone 6. Repeat it if it reports "not applied
+  by the PIC".
+- **CM0:** `l\a` powers it. Wait about a minute for Linux to boot.
+- **Python packages on the CM0:** the CM0 image has `python3-spidev`.
+  pyserial isn't needed, because `linktest.py` has a built-in UART driver.
+
+### Scripted run
+
+This is the 2026-11-07 run. It takes about 3 minutes and needs no network or
+USB on the CM0.
+
+```sh
+python host/cm0put.py COM14 cm0/linktest.py /tmp/linktest.py
+python host/cm0put.py COM14 cm0/linktest_job.py /tmp/linktest_job.py
+(cd wilifpga && tools/fwfpga --port COM14 install linktest)
+python host/cm0sh.py COM14 0.5 "sudo setsid nohup python3 /tmp/linktest_job.py >/dev/null 2>&1 </dev/null &"
+python host/linktest_run.py COM14
+python host/cm0sh.py COM14 1.5 "cat /tmp/lt2.log"    # once the bridge is back, ~20 s after the run
+```
+
+### By hand
+
+Use this if the CM0 has SSH or a USB serial port.
+
+1. **On the CM0:** `sudo systemctl kill -s KILL fwcm0-bridge`. A plain
+   `stop` takes 90 s, because the bridge ignores SIGTERM.
+2. **On the PC,** from `wilifpga/`: `tools/fwfpga install linktest`, then
+   `tools/fwfpga load linktest`.
 3. **Pin map:** on the PC, `python host/linkstat.py --port COM14 clear`. On the
    CM0, `sudo python3 linktest.py pins`. Then on the PC,
    `python host/linkstat.py --port COM14 show`. Each input's edge count ÷ 2 is
    the CM0 GPIO that drives it.
-4. **SPI:** if the map differs from the defaults (SCLK on input 1, data on
-   input 0), set register 0x20. Then on the CM0 run
-   `python3 linktest.py spi --hz 7000000`, and try higher rates. After each
-   run, check `show` on the PC: the byte count should match and errors should
-   be 0. Clear between runs.
-5. **UART, CM0 to FPGA:** `python3 linktest.py uart-tx`. Set register 0x30 to
-   the input the map found.
+4. **SPI:** `python3 linktest.py spi --hz 12500000` on the CM0, then `show` on
+   the PC. The byte count should match and errors should be 0. Clear between
+   runs.
+5. **UART, CM0 to FPGA:** `python3 linktest.py uart-tx`. The receiver defaults
+   to input 3 (GPIO14).
 6. **UART, FPGA to CM0:** on the PC, `python host/linkstat.py tx on`. On the
    CM0, `python3 linktest.py uart-rx`.
 7. **Clean up:** on the PC, `tools/fwfpga restore`. On the CM0,

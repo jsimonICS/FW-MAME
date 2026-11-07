@@ -13,7 +13,8 @@ host/linkstat.py.
 `pins` drives each candidate GPIO as an output and toggles it 2 x (GPIO
 number) times, so on the FPGA an input's edge count / 2 is the GPIO that
 drives it. It restores each pin's function afterwards. Needs `pinctrl`
-(Raspberry Pi OS). `spi` needs python3-spidev, the UART tests pyserial.
+(Raspberry Pi OS). `spi` needs python3-spidev. The UART tests use pyserial
+if it is installed, else a built-in termios2 driver.
 
 Every test sends an incrementing byte sequence, which the FPGA checks.
 """
@@ -23,10 +24,12 @@ import subprocess
 import sys
 import time
 
-# CM0 GPIOs the stock link is known or likely to use (wilicm0bsp: SPI0 on
-# 9-11, PL011 UART on 14/15 with RTS/CTS on 16/17, software CS on 21) plus
-# SPI1's other pins.
-CANDIDATES = (9, 10, 11, 14, 15, 16, 17, 19, 20, 21)
+# Only the CM0 GPIOs that are already outputs in the stock link (wilicm0bsp:
+# SPI0 MOSI 10 and SCLK 11, PL011 TXD 14 and RTS 17, software CS 21): the
+# FPGA has exactly 5 inputs from the CM0, and these 5 cannot be wired to one
+# of its 2 outputs. Never drive a pin the FPGA may be driving (e.g. RXD 15,
+# CTS 16, MISO 9): two outputs on one wire is contention.
+CANDIDATES = (10, 11, 14, 17, 21)
 
 
 def bridge_running():
@@ -100,9 +103,54 @@ def cmd_spi(args):
     print("On the PC: python host/linkstat.py show  (SPI bytes should match, errors 0)")
 
 
+class RawUart:
+    """Just enough of pyserial for these tests, from the standard library:
+    raw 8N1 at any baud rate through Linux's termios2 (BOTHER). The CM0 image
+    has no pyserial and may have no network to install it."""
+    TCGETS2, TCSETS2 = 0x802C542A, 0x402C542B      # _IOR/_IOW('T', 0x2A/0x2B, struct termios2)
+    BOTHER, CBAUD, CRTSCTS = 0o010000, 0o010017, 0o20000000000
+    FMT = "4I B 19s 2I"                            # iflag oflag cflag lflag line cc[19] ispeed ospeed
+
+    def __init__(self, port, baud, rtscts=False):
+        import fcntl, os, struct, termios
+        self.os, self.termios = os, termios
+        self.fd = os.open(port, os.O_RDWR | os.O_NOCTTY)
+        buf = bytearray(struct.calcsize(self.FMT))
+        fcntl.ioctl(self.fd, self.TCGETS2, buf)
+        _, _, cflag, _, line, cc, _, _ = struct.unpack(self.FMT, buf)
+        cc = bytearray(cc)
+        cc[termios.VMIN], cc[termios.VTIME] = 0, 2   # reads return after 0.2 s with no data
+        cflag = (cflag & ~(self.CBAUD | termios.CSIZE | termios.PARENB | termios.CSTOPB | self.CRTSCTS)) \
+            | self.BOTHER | termios.CS8 | termios.CREAD | termios.CLOCAL | (self.CRTSCTS if rtscts else 0)
+        fcntl.ioctl(self.fd, self.TCSETS2, struct.pack(self.FMT, 0, 0, cflag, 0, line, bytes(cc), baud, baud))
+
+    def write(self, data):
+        view = memoryview(data)
+        while view:
+            view = view[self.os.write(self.fd, view):]
+
+    def read(self, n):
+        return self.os.read(self.fd, n)
+
+    def flush(self):
+        self.termios.tcdrain(self.fd)
+
+    def reset_input_buffer(self):
+        self.termios.tcflush(self.fd, self.termios.TCIFLUSH)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.os.close(self.fd)
+
+
 def open_uart(args):
-    import serial
-    return serial.Serial(args.port, args.baud, timeout=0.2, rtscts=args.rtscts)
+    try:
+        import serial
+        return serial.Serial(args.port, args.baud, timeout=0.2, rtscts=args.rtscts)
+    except ImportError:
+        return RawUart(args.port, args.baud, args.rtscts)
 
 
 def cmd_uart_tx(args):
