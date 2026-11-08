@@ -10,6 +10,9 @@ Description=FW-MAME game supervisor (started by the FW2 display app)
 
 [Service]
 Type=simple
+# The frontend keeps the core's system files (samples, hiscore.dat) and saves
+# under $HOME/fwmame, the same place run.sh uses; systemd sets no HOME.
+Environment=HOME=/home/pi
 # fwcm0-bridge owns SPI0, the UART and GPIO21, and ignores SIGTERM (a plain
 # stop takes 90 s): kill it, then stop it so systemd doesn't restart it.
 ExecStartPre=-/bin/systemctl kill -s KILL fwcm0-bridge

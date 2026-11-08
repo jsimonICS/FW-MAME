@@ -17,7 +17,8 @@ enum { FWFB_WIDTH = 0, FWFB_HEIGHT = 1, FWFB_XSTART = 2, FWFB_YSTART = 3, FWFB_C
 //   bytes 0-1  FW2 buttons, a set bit = held (FWFB_BTN_*)
 //   bytes 2-3  USB controller buttons (FWFB_PAD_*), 0 when none is plugged in
 //   bytes 4-5  USB controller left stick X, Y (int8, 0 = centre), 0 when none
-//   byte 6     game requested from the menu (fbuf v004 menu, 1..63), 0 = none
+//   byte 6     game requested from the menu (fbuf v004 menu, 1..63), 0 = none;
+//              in the menu, 0x80 | the game under the cursor (0x80 = none / QUIT)
 //   byte 7     update counter: the app adds 1 on every write
 enum {
   FWFB_BTN_GREY = 0, FWFB_BTN_YELLOW, FWFB_BTN_GREEN, FWFB_BTN_BLUE, FWFB_BTN_RED,

@@ -35,6 +35,7 @@
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
+#include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
 #include <strings.h>
@@ -476,6 +477,66 @@ static bool idle_gone(void) {
     return false;
 }
 
+// ---------------------------------------------------------------- CRT marquee
+// While the menu waits, the CRT shows the marquee of the game under the FW2's
+// cursor (input byte 6 = 0x80 | game while in the menu). tools/marquees.py
+// makes the files (.fmq, format described there; CRT set: <= 320x200, one
+// fixed 256-colour palette exact in RGB333) and puts them in <romdir>/../marquees.
+#define CRT_W 320
+#define CRT_H 200
+static uint8_t crt_px[CRT_W * CRT_H];
+
+// Draws <mqdir>/<zip name without .zip, lower case>.fmq centred, or black when
+// zip is NULL or has no marquee. The palette goes out with the first marquee.
+static void crt_marquee(fwfb *fb, const char *mqdir, const char *zip, bool *pal_sent) {
+    memset(crt_px, 0, sizeof crt_px);                 // index 0 = black in the CRT palette
+    static uint8_t buf[256 * 1024];
+    size_t len = 0;
+    if (zip) {
+        char name[256], path[1024];
+        size_t k = 0;
+        for (; zip[k] && k < sizeof name - 1; k++) name[k] = (char)tolower((unsigned char)zip[k]);
+        name[k] = '\0';
+        if (k > 4 && !strcmp(name + k - 4, ".zip")) name[k - 4] = '\0';
+        snprintf(path, sizeof path, "%s/%s.fmq", mqdir, name);
+        FILE *f = fopen(path, "rb");
+        if (f) { len = fread(buf, 1, sizeof buf, f); fclose(f); }
+    }
+    const unsigned w = len >= 10 ? (unsigned)(buf[4] | buf[5] << 8) : 0, h = len >= 10 ? (unsigned)(buf[6] | buf[7] << 8) : 0;
+    const unsigned nc = len >= 10 ? (unsigned)(buf[8] | buf[9] << 8) : 0;
+    if (len >= 10 && !memcmp(buf, "FMQ1", 4) && w && w <= CRT_W && h && h <= CRT_H && nc && nc <= 256 &&
+        10 + 2 * nc <= len) {
+        if (!*pal_sent) {                             // RGB565 (high byte first) -> RGB333
+            uint16_t pal[256] = {0};
+            for (unsigned i = 0; i < nc; i++) {
+                const unsigned c = (unsigned)buf[10 + 2 * i] << 8 | buf[11 + 2 * i];
+                pal[i] = (uint16_t)(((c >> 13) & 7) << 6 | ((c >> 8) & 7) << 3 | ((c >> 2) & 7));
+            }
+            fwfb_palette(fb, 0, 256, pal);
+            *pal_sent = true;
+        }
+        const unsigned x0 = (CRT_W - w) / 2, y0 = (CRT_H - h) / 2;
+        size_t p = 10 + 2 * nc;
+        unsigned x = 0, y = 0;
+        while (p < len && y < h) {                    // PackBits -> pixels
+            const unsigned c = buf[p++];
+            unsigned count = 0;
+            int literal = 0;
+            if (c < 128) { count = c + 1; literal = 1; }
+            else if (c > 128) count = 257 - c;
+            uint8_t v = (!literal && p < len) ? buf[p++] : 0;
+            for (unsigned i = 0; i < count && y < h; i++) {
+                if (literal) { if (p >= len) break; v = buf[p++]; }
+                crt_px[(y0 + y) * CRT_W + x0 + x] = v;
+                if (++x == w) { x = 0; y++; }
+            }
+        }
+    }
+    fwfb_pixels(fb, 0, crt_px, sizeof crt_px);
+    fwfb_flip(fb);
+    if (zip) fprintf(stderr, "[fwmame] menu: CRT marquee for %s: %s\n", zip, w ? "shown" : "none");
+}
+
 static int supervisor(const char *core_path, const char *romdir) {
     char self[512];
     ssize_t sl = readlink("/proc/self/exe", self, sizeof self - 1);
@@ -483,6 +544,12 @@ static int supervisor(const char *core_path, const char *romdir) {
     self[sl] = '\0';
     uint8_t serial = 0;
     int failed = 0;                                   // game that just failed: wait for the request to change
+    char mqdir[1024];                                 // <romdir>/../marquees
+    snprintf(mqdir, sizeof mqdir, "%s", romdir);
+    for (size_t k = strlen(mqdir); k > 1 && mqdir[k - 1] == '/';) mqdir[--k] = '\0';
+    char *slash = strrchr(mqdir, '/');
+    if (slash) snprintf(slash + 1, sizeof mqdir - (size_t)(slash + 1 - mqdir), "marquees");
+    else snprintf(mqdir, sizeof mqdir, "marquees");
     t_supervisor_start = now_s();
     while (running) {
         // the list: sorted *.zip names
@@ -514,15 +581,14 @@ static int supervisor(const char *core_path, const char *romdir) {
             continue;
         }
         fpga_seen();
-        static uint8_t black[256 * 224];
         const uint16_t pal0 = 0;
-        fwfb_mode(fb, 256, 224, 0);
+        bool pal_sent = false;
+        fwfb_mode(fb, CRT_W, CRT_H, 0);
         fwfb_palette(fb, 0, 1, &pal0);
-        fwfb_pixels(fb, 0, black, sizeof black);
-        fwfb_flip(fb);
+        crt_marquee(fb, mqdir, NULL, &pal_sent);      // black until the cursor is known
         fwfb_menu(fb, 0, menu, 32 * ((size_t)n + 1));
         fprintf(stderr, "[fwmame] menu: %d games published (serial %u)\n", n, serial);
-        int req = 0;
+        int req = 0, shown = -1;
         while (running) {
             if (fwfb_wait_status(fb, 200) < 0) {
                 if (idle_gone()) { running = 0; break; }
@@ -533,6 +599,11 @@ static int supervisor(const char *core_path, const char *romdir) {
             fwfb_inputs(fb, in);
             if (in[6] != failed) failed = 0;
             if (in[6] >= 1 && in[6] <= n && in[6] != failed) { req = in[6]; break; }
+            const int hover = (in[6] & 0x80) ? (in[6] & 0x7F) : 0;   // the FW2's cursor (0 = QUIT / none)
+            if (hover != shown) {
+                crt_marquee(fb, mqdir, hover >= 1 && hover <= n ? files[hover - 1] : NULL, &pal_sent);
+                shown = hover;
+            }
         }
         fwfb_close(fb);
         if (req) {

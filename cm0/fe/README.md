@@ -21,9 +21,12 @@ the FW-MAME framebuffer ([cm0/fb](../fb), [fpga/fbuf](../../fpga/fbuf)):
 
 - **Game menu** (`--menu <romdir>`, what `run.sh` does with no game): a
   supervisor publishes the zips in the folder as the game list in the FPGA's
-  menu memory (`fwfb_menu()`, fbuf v004), which the FW2 display app shows. It
-  shows black on the CRT and waits for the app to request a game (input byte
-  6). It then runs the game as a child process (`--menu-id n`), which exits
+  menu memory (`fwfb_menu()`, fbuf v004), which the FW2 display app shows.
+  While it waits for the app to request a game (input byte 6 = 1..63), the
+  CRT shows the marquee of the game under the FW2's cursor (byte 6 =
+  `0x80 | game`): `<romdir>/../marquees/<rom>.fmq` (from
+  `tools/marquees.py build` and `install-cm0`) in a 320x200 picture, black
+  for a game without one. It then runs the game as a child process (`--menu-id n`), which exits
   when the request changes (HOME on the FW2, or another game). A game that
   fails is reported in the list header (byte 3) and not retried until it's
   picked again. Each game runs in a fresh process, so the core never has to

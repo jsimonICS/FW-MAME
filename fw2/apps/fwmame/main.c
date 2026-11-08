@@ -25,10 +25,12 @@
  * saved per VID:PID as /appdata/fwmame/pad_VVVVPPPP.map. Learning starts by
  * itself for a stick without a map; the LEARN touch button redoes it.
  *
- * All buttons go to the game, including HOME and PAGE; holding HOME for 5 s
- * still leaves the app and holding PAGE for 5 s shows About (FW2App
- * contract). The labels over the five coloured buttons show FW-MAME's
- * default mapping, which lives on the CM0. */
+ * Game menu: the CM0 publishes the ROM list; the d-pad and OK pick a game,
+ * HOME returns to the menu. The top band shows the selected game's marquee
+ * (SD card, see the marquee section); a PAGE tap swaps it for the status rows.
+ * Holding HOME for 5 s still leaves the app and holding PAGE for 5 s shows
+ * About (FW2App contract). The labels over the five coloured buttons show
+ * FW-MAME's default mapping, which lives on the CM0. */
 #include "fw2.h"
 #include "platform/diag.h"
 #include "pico/stdlib.h"
@@ -71,14 +73,32 @@ static inline uint16_t be16(uint16_t c) { return (uint16_t)((c >> 8) | (c << 8))
 enum { ROW_STATE, ROW_LINK, ROW_STATS, ROW_USB, ROW_RAW, ROW_COUNT };
 #define ROW_Y(r) (26 + (r) * 18)
 
+/* The top band (y 0-116) shows either the selected game's marquee, with the
+ * state line small underneath (STRIP_Y), or these status rows (diagnostics).
+ * The rows are kept as text, so switching views (PAGE) can redraw them. */
+#define BAND_H  117
+#define STRIP_Y 106
+static char row_text[ROW_COUNT][40];
+static uint16_t row_fg[ROW_COUNT];
+static bool band_marquee(void);
+
+static void draw_strip(void) {
+    st7796_fill_rect(0, STRIP_Y, ST7796_W, 9, C_BLACK);
+    st7796_draw_text(8, STRIP_Y, 1, row_fg[ROW_STATE], C_BLACK, row_text[ROW_STATE]);
+}
+
 static void line(int row, uint16_t fg, const char *fmt, ...) {
-    char s[40];
     va_list ap;
     va_start(ap, fmt);
-    vsnprintf(s, sizeof s, fmt, ap);
+    vsnprintf(row_text[row], sizeof row_text[row], fmt, ap);
     va_end(ap);
-    st7796_fill_rect(8, ROW_Y(row), 464, 16, C_BLACK);
-    st7796_draw_text(8, ROW_Y(row), 2, fg, C_BLACK, s);
+    row_fg[row] = fg;
+    if (!band_marquee()) {
+        st7796_fill_rect(8, ROW_Y(row), 464, 16, C_BLACK);
+        st7796_draw_text(8, ROW_Y(row), 2, fg, C_BLACK, row_text[row]);
+    } else if (row == ROW_STATE) {
+        draw_strip();
+    }
 }
 
 static void line_at(int y, uint16_t fg, const char *fmt, ...) {
@@ -482,7 +502,9 @@ static void pad_update(void) {
 
 /* One h\f\w with all 8 input bytes (bare hex tokens); the write to 0x37 commits.
  * In a game, OK (the check mark) also presses B1 (GREEN) and CANCEL (the X) also
- * presses B2 (BLUE). Byte 6 is the game requested from the menu. */
+ * presses B2 (BLUE). Byte 6 is the game requested from the menu; in the menu
+ * it is 0x80 | the game under the cursor (0x80 alone on QUIT), so the CM0 can
+ * show that game's marquee on the CRT. */
 static bool write_inputs(void) {
     char cmd[64];
     uint16_t b = buttons;
@@ -490,9 +512,11 @@ static bool write_inputs(void) {
         if (b >> UARTKBD_BTN_OK & 1u) b |= 1u << UARTKBD_BTN_GREEN;
         if (b >> UARTKBD_BTN_CANCEL & 1u) b |= 1u << UARTKBD_BTN_BLUE;
     }
+    const uint8_t b6 = requested ? requested
+                     : (uint8_t)(0x80u | ((game_count > 0 && cursor < game_count) ? (unsigned)cursor + 1u : 0u));
     counter++;
     snprintf(cmd, sizeof cmd, "h\\f\\w %02X %02X %02X %02X %02X %02X %02X %02X %02X", REG_INPUTS, b & 0xFFu,
-             b >> 8, pad_bits & 0xFFu, pad_bits >> 8, (uint8_t)stick_x, (uint8_t)stick_y, requested, counter);
+             b >> 8, pad_bits & 0xFFu, pad_bits >> 8, (uint8_t)stick_x, (uint8_t)stick_y, b6, counter);
     const uint64_t t0 = time_us_64();
     const bool ok = call("INPUTS", cmd, 500);
     last_ms = (uint32_t)((time_us_64() - t0) / 1000u);
@@ -688,6 +712,176 @@ static void audio_poll(uint64_t now) {
     }
 }
 
+/* ======================================================= marquees
+ * The selected game's marquee fills the top band. tools/marquees.py makes them
+ * (.fmq: 256 colours, PackBits; the format is described there) and puts them
+ * on the SD card in MQ_DIR, named after the ROM zip. The SD card is reached
+ * through MAIN in 96-byte pieces, so a file (15-45 KB) is read a few hundred
+ * bytes per main-loop pass, the one under the cursor first, then the rest
+ * while the menu is idle. Each one read stays in PSRAM, so after that moving
+ * the cursor is instant. Nothing is read while a game runs: the link to MAIN
+ * carries its audio then. A game without a marquee shows its name. */
+#define MQ_DIR    "/appdata/fwmame/marquees"
+#define MQ_W      472
+#define MQ_H      100
+#define MQ_Y      2
+#define MQ_MAX    (64u * 1024u)        /* largest file accepted */
+#define MQ_POOL   (3u * 1024u * 1024u)
+#define MQ_STEP   480u                 /* bytes read per main-loop pass */
+enum { MQ_UNKNOWN, MQ_CACHED, MQ_NONE };
+static uint8_t __uninitialized_psram("fwmame_mq") mq_pool[MQ_POOL];
+static uint8_t __uninitialized_psram("fwmame_mqidx") mq_idx[MQ_W * MQ_H];
+static uint8_t *mq_data[64];
+static uint32_t mq_len[64];
+static uint32_t mq_used;
+static const char *game_name(int id);
+static uint8_t mq_state[64];           /* per game id (1-based) */
+static int mq_loading;                 /* game id being read, 0 = none */
+static ow_sd_file mq_file;
+static uint32_t mq_off, mq_size;
+static int mq_shown = -1;              /* what the band shows: game id, 0 = title, -1 = nothing yet */
+static bool diag_view;                 /* PAGE: status rows in the band instead */
+static bool band_drawn_marquee;        /* which view the band was last drawn in */
+
+/* Marquee view once the game list is in; the status rows while starting up,
+ * while learning a stick (its prompts are in those rows) or when PAGE asks. */
+static bool band_marquee(void) { return !diag_view && game_count >= 0 && learn < 0; }
+
+static void mq_reset(void) {           /* the game list changed: ids mean other games now */
+    if (mq_loading) { (void)ow_sd_close(&mq_file); mq_loading = 0; }
+    memset(mq_state, 0, sizeof mq_state);
+    mq_used = 0;
+    mq_shown = -1;
+}
+
+static int mq_wanted(void) {           /* the running/starting game, else the one under the cursor */
+    if (requested) return requested;
+    return (game_count > 0 && cursor < game_count) ? cursor + 1 : 0;
+}
+
+static void mq_text(const char *s, uint16_t fg) {   /* big centred text in place of a marquee */
+    st7796_fill_rect(0, 0, ST7796_W, STRIP_Y, C_BLACK);
+    const int n = (int)strlen(s) > 19 ? 19 : (int)strlen(s);
+    char t[20];
+    memcpy(t, s, (size_t)n);
+    t[n] = '\0';
+    st7796_draw_text((ST7796_W - n * 24) / 2, MQ_Y + 34, 4, fg, C_BLACK, t);
+}
+
+static bool mq_draw(int id) {
+    const uint8_t *d = mq_data[id];
+    const unsigned w = d[4] | d[5] << 8, h = d[6] | d[7] << 8, nc = d[8] | d[9] << 8;
+    if (memcmp(d, "FMQ1", 4) || !w || w > MQ_W || !h || h > MQ_H || !nc || nc > 256) return false;
+    const uint8_t *pal = d + 10, *p = pal + 2 * nc, *end = d + mq_len[id];
+    uint32_t k = 0;
+    const uint32_t total = w * h;
+    while (k < total && p < end) {                   /* PackBits -> palette indexes */
+        const unsigned c = *p++;
+        if (c < 128) {
+            for (unsigned i = 0; i <= c && k < total && p < end; i++) mq_idx[k++] = *p++;
+        } else if (c > 128 && p < end) {
+            const uint8_t v = *p++;
+            for (unsigned i = 0; i < 257u - c && k < total; i++) mq_idx[k++] = v;
+        }
+    }
+    if (k != total) return false;
+    st7796_fill_rect(0, 0, ST7796_W, STRIP_Y, C_BLACK);
+    static uint16_t row[MQ_W];
+    const unsigned x0 = (ST7796_W - w) / 2, y0 = MQ_Y + (MQ_H - h) / 2;
+    for (unsigned y = 0; y < h; y++) {
+        const uint8_t *ix = mq_idx + y * w;
+        for (unsigned x = 0; x < w; x++) {
+            const unsigned i = ix[x] < nc ? ix[x] : 0;
+            row[x] = (uint16_t)(pal[2 * i] | pal[2 * i + 1] << 8);   /* file order = wire order */
+        }
+        st7796_blit_rect((uint16_t)x0, (uint16_t)(y0 + y), (uint16_t)(x0 + w - 1), (uint16_t)(y0 + y), row);
+    }
+    return true;
+}
+
+static void band_redraw(void) {
+    st7796_fill_rect(0, 0, ST7796_W, BAND_H, C_BLACK);
+    band_drawn_marquee = band_marquee();
+    mq_shown = -1;
+    if (band_drawn_marquee) {
+        draw_strip();                                 /* mq_task() draws the marquee */
+        return;
+    }
+    st7796_draw_text(8, 8, 2, C_WHITE, C_BLACK, "FW-MAME");
+    for (int r = 0; r < ROW_COUNT; r++)
+        if (row_text[r][0]) st7796_draw_text(8, ROW_Y(r), 2, row_fg[r], C_BLACK, row_text[r]);
+}
+
+static void mq_path(int id, char *out, size_t n) {
+    char name[32];
+    size_t k = 0;
+    for (const char *s = game_names[id - 1]; *s && k < sizeof name - 1; s++) {
+        const char c = (*s >= 'A' && *s <= 'Z') ? (char)(*s + 32) : *s;
+        if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' || c == '-') name[k++] = c;
+    }
+    name[k] = '\0';
+    snprintf(out, n, MQ_DIR "/%s.fmq", name);
+}
+
+static void mq_task(void) {
+    if (band_marquee() != band_drawn_marquee) band_redraw();
+    const int want = mq_wanted();
+    /* the band */
+    if (band_drawn_marquee && want != mq_shown) {
+        if (want == 0) { mq_text("FW-MAME", C_WHITE); mq_shown = 0; }
+        else if (mq_state[want] == MQ_CACHED) { if (!mq_draw(want)) mq_text(game_name(want), C_WHITE); mq_shown = want; }
+        else if (mq_state[want] == MQ_NONE) { mq_text(game_name(want), C_WHITE); mq_shown = want; }
+        else if (mq_shown != -100 - want) { mq_text(game_name(want), C_GREY); mq_shown = -100 - want; }  /* until it's read */
+    }
+    /* reading: menu only, link up */
+    const bool may = running && !requested && !cm0_running && game_count > 0;
+    if (!may) {
+        if (mq_loading) { (void)ow_sd_close(&mq_file); mq_loading = 0; }
+        return;
+    }
+    if (mq_loading && mq_loading != want && want && mq_state[want] == MQ_UNKNOWN) {
+        (void)ow_sd_close(&mq_file);                  /* the cursor moved on: read that one first */
+        mq_loading = 0;
+    }
+    if (!mq_loading) {
+        int id = (want && mq_state[want] == MQ_UNKNOWN) ? want : 0;
+        for (int i = 1; !id && i <= game_count; i++)
+            if (mq_state[i] == MQ_UNKNOWN) id = i;
+        if (!id) return;                              /* all read */
+        char path[64];
+        mq_path(id, path, sizeof path);
+        bool is_dir = false;
+        uint32_t size = 0;
+        if (ow_sd_stat(&dev, path, &is_dir, &size) != OW_OK || is_dir || size < 16 || size > MQ_MAX ||
+            mq_used + size > MQ_POOL || ow_sd_open(&dev, &mq_file, path, OW_SD_READ) != OW_OK) {
+            mq_state[id] = MQ_NONE;
+            return;
+        }
+        mq_loading = id;
+        mq_off = 0;
+        mq_size = size;
+        mq_data[id] = mq_pool + mq_used;
+    }
+    size_t got = 0;
+    const uint32_t n = mq_size - mq_off < MQ_STEP ? mq_size - mq_off : MQ_STEP;
+    if (ow_sd_read(&mq_file, mq_data[mq_loading] + mq_off, n, &got) != OW_OK || got == 0) {
+        (void)ow_sd_close(&mq_file);
+        mq_state[mq_loading] = MQ_NONE;
+        mq_loading = 0;
+        return;
+    }
+    mq_off += (uint32_t)got;
+    if (mq_off >= mq_size) {
+        (void)ow_sd_close(&mq_file);
+        const int id = mq_loading;
+        mq_loading = 0;
+        mq_len[id] = mq_size;
+        mq_used += (mq_size + 3u) & ~3u;
+        mq_state[id] = memcmp(mq_data[id], "FMQ1", 4) == 0 ? MQ_CACHED : MQ_NONE;
+        if (id == want) mq_shown = -1;                /* draw it now */
+    }
+}
+
 /* ======================================================= game menu
  * The CM0 (cm0/fe, `run.sh` with no game) writes its game list into the FPGA's
  * menu memory (fbuf v004): page 0 = {count, serial, running game}, page n =
@@ -766,6 +960,7 @@ static void menu_poll(void) {
             game_names[got][k] = '\0';
         }
         if (got == n) {
+            mq_reset();
             game_count = n;
             game_serial = p[1];
             if (cursor > game_count) cursor = 0;       /* game_count = the QUIT item */
@@ -785,8 +980,8 @@ static void menu_poll(void) {
 
 /* ======================================================= CM0 power and the game service
  * Launching the app from the FW2's Apps menu has to bring up the CM0 side too:
- *   1. the CM0 on: MAIN's l\a (a toggle, so only when h\p\g shows it off; the
- *      app also holds zone 17, so its power frames don't switch it back off);
+ *   1. the CM0 on: MAIN's l\a, a toggle, used only when MAIN's shell answers
+ *      EPOWERZONE (Linux off). Zone 17 is MAIN's; the app never touches it;
  *   2. while the stock FPGA and fwcm0-bridge still run, a MAIN Linux-shell
  *      session (l\c / l\w / l\r / l\e) runs `systemctl start --no-block
  *      fwmame` (cm0/fe/fwmame.service: stops the bridge, runs the game menu
@@ -807,18 +1002,15 @@ static bool cm0_running_now(void) {
     return up;
 }
 
+/* Zone 17 is MAIN's: it powers the module and raises its run line (zone 19)
+ * when Linux is switched on. Apps must never request or release it
+ * (wilibsp docs/drivers/power.md): an app holding the rail up powers the
+ * module with its run line low, and fights MAIN's own power-up. */
 static bool cm0_power_on(void) {
-    picpwr_keep_awake(picpwr_zone_bit(PICPWR_ZONE_COMPUTE));
-    if (cm0_running_now()) return true;
-    line(ROW_STATE, C_WHITE, "TURNING ON THE CM0...");
-    for (int attempt = 0; attempt < 2; attempt++) {  /* l\a toggles: if it answers "off", toggle again */
-        if (call("CM0ON", "l\\a", 3000) && strstr(reply, "ON")) break;
-    }
-    for (int waited = 0; waited < 10000; waited += 250) {
-        if (cm0_running_now()) return true;
-        fw2_app_recovery_sleep_ms(250);
-    }
-    return false;
+    /* Just a report: the rail can't tell whether Linux is switched on (it read
+     * on with the module held in reset). start_game_service() switches Linux
+     * on when MAIN's shell answers EPOWERZONE. */
+    return cm0_running_now();
 }
 
 static void shell_write(const char *text) {
@@ -828,50 +1020,73 @@ static void shell_write(const char *text) {
     call("SHW", cmd, 2000);
 }
 
+/* Read the session's output (l\r body: "<n> <hex> ...") until the hex string
+ * `needle` shows up, over at most `reads` reads 250 ms apart. Keeps a sliding
+ * window of the hex, so a match split across reads still counts and a long
+ * login banner can't fill the buffer. */
+static bool shell_wait(const char *needle, int reads) {
+    static char acc[1024];
+    const size_t keep = strlen(needle);
+    acc[0] = '\0';
+    for (int i = 0; i < reads; i++) {
+        fw2_app_recovery_sleep_ms(250);
+        if (!call("SHR", "l\\r " SHELL_TOKEN " 192", 2000)) continue;
+        DIAG("fwmame: shell read '%.48s'\n", reply);
+        const char *p = strchr(reply, ' ');           /* the hex is the second token */
+        if (!p) continue;
+        size_t k = strlen(acc);
+        if (k > sizeof acc - 400) {                   /* keep only the tail that could start a match */
+            memmove(acc, acc + k - keep, keep + 1);
+            k = keep;
+        }
+        for (p++; *p && *p != ' ' && k < sizeof acc - 1; p++)
+            if ((*p >= '0' && *p <= '9') || (*p >= 'A' && *p <= 'F') || (*p >= 'a' && *p <= 'f'))
+                acc[k++] = (char)(*p >= 'a' ? *p - 32 : *p);
+        acc[k] = '\0';
+        if (strstr(acc, needle)) return true;
+    }
+    return false;
+}
+
 /* Wait for the CM0's shell through MAIN (Linux boots in ~30 s) and start the service. */
 static bool start_game_service(void) {
     line(ROW_STATE, C_WHITE, "WAITING FOR CM0 LINUX...");
-    for (int waited = 0; waited < 150000; waited += 3000) {
+    int toggles = 0, since_toggle = 1000000;
+    for (int waited = 0; waited < 150000; waited += 3000, since_toggle += 3000) {
         call("SHE", "l\\e " SHELL_TOKEN, 1000);
         const bool opened = call("SHC", "l\\c " SHELL_TOKEN, 2000);
         DIAG("fwmame: shell open %d: '%.60s'\n", (int)opened, reply);
+        /* EPOWERZONE from the shell is the sure sign that MAIN's "Linux CPU
+         * power" is off: switch it on. l\a toggles, so: only on EPOWERZONE,
+         * give MAIN 30 s to power the module before another try, and if the
+         * answer is OFF (it was on after all) toggle straight back. */
+        if (!opened && strstr(reply, "EPOWERZONE") && since_toggle >= 30000 && toggles < 3) {
+            line(ROW_STATE, C_WHITE, "TURNING ON THE CM0...");
+            toggles++;
+            since_toggle = 0;
+            const bool ok = call("CM0ON", "l\\a", 3000);
+            DIAG("fwmame: CM0 Linux power toggled: '%.40s'\n", reply);
+            if (ok && strstr(reply, "OFF")) {
+                call("CM0ON", "l\\a", 3000);
+                DIAG("fwmame: CM0 Linux power toggled back: '%.40s'\n", reply);
+            }
+            line(ROW_STATE, C_WHITE, "WAITING FOR CM0 LINUX...");
+        }
         if (opened) {
-            shell_write("echo FWMAME_\"\"OK\n");     /* the echo, not the typed command, matches */
-            static char acc[1600];                   /* hex of the shell output so far (reads may split it) */
-            acc[0] = '\0';
-            for (int i = 0; i < 8; i++) {
-                fw2_app_recovery_sleep_ms(250);
-                if (!call("SHR", "l\\r " SHELL_TOKEN " 192", 2000)) continue;
-                DIAG("fwmame: shell read '%.48s'\n", reply);
-                const char *hex = strchr(reply, ' ');   /* body: "<n> <hex>" */
-                size_t k = strlen(acc);
-                for (const char *p = hex ? hex + 1 : ""; *p && k < sizeof acc - 1; p++)
-                    if ((*p >= '0' && *p <= '9') || (*p >= 'A' && *p <= 'F') || (*p >= 'a' && *p <= 'f'))
-                        acc[k++] = (char)(*p >= 'a' ? *p - 32 : *p);
-                acc[k] = '\0';
-                if (strstr(acc, "46574D414D455F4F4B")) {             /* "FWMAME_OK": the shell answers */
-                    line(ROW_STATE, C_WHITE, "STARTING THE GAME SERVICE...");
-                    /* Detached, so closing this session (a hangup) can't kill it
-                     * before the job is queued; then wait for "FWMAME_GO". */
-                    shell_write("setsid sudo systemctl start --no-block fwmame </dev/null >/dev/null 2>&1 & "
-                                "sleep 1; echo FWMAME_\"\"GO\n");
-                    acc[0] = '\0';
-                    bool go = false;
-                    for (int j = 0; j < 40 && !go; j++) {   /* the login banner comes first */
-                        fw2_app_recovery_sleep_ms(250);
-                        if (!call("SHR", "l\\r " SHELL_TOKEN " 192", 2000)) continue;
-                        const char *h2 = strchr(reply, ' ');
-                        size_t m = strlen(acc);
-                        for (const char *p = h2 ? h2 + 1 : ""; *p && m < sizeof acc - 1; p++)
-                            if ((*p >= '0' && *p <= '9') || (*p >= 'A' && *p <= 'F') || (*p >= 'a' && *p <= 'f'))
-                                acc[m++] = (char)(*p >= 'a' ? *p - 32 : *p);
-                        acc[m] = '\0';
-                        go = strstr(acc, "46574D414D455F474F") != NULL;
-                    }
-                    DIAG("fwmame: game service start %s\n", go ? "confirmed" : "NOT confirmed");
-                    call("SHE", "l\\e " SHELL_TOKEN, 1000);
-                    return go;
-                }
+            /* A new session is a fresh login: the banner (well over 1 KB) comes
+             * before the echo, so read for up to ~10 s. The echo, not the typed
+             * command, matches ("" splits the typed one). */
+            shell_write("echo FWMAME_\"\"OK\n");
+            if (shell_wait("46574D414D455F4F4B", 40)) {             /* "FWMAME_OK" */
+                line(ROW_STATE, C_WHITE, "STARTING THE GAME SERVICE...");
+                /* Detached, so closing this session (a hangup) can't kill it
+                 * before the job is queued; then wait for "FWMAME_GO". */
+                shell_write("setsid sudo systemctl start --no-block fwmame </dev/null >/dev/null 2>&1 & "
+                            "sleep 1; echo FWMAME_\"\"GO\n");
+                const bool go = shell_wait("46574D414D455F474F", 40);  /* "FWMAME_GO" */
+                DIAG("fwmame: game service start %s\n", go ? "confirmed" : "NOT confirmed");
+                call("SHE", "l\\e " SHELL_TOKEN, 1000);
+                return go;
             }
         }
         fw2_app_recovery_sleep_ms(3000);
@@ -1011,6 +1226,10 @@ int main(void) {
                 learn_next();
             }
             if (!ev.pressed) continue;
+            if (ev.btn == UARTKBD_BTN_PAGE) {                   /* marquee <-> status rows */
+                diag_view = !diag_view;
+                band_redraw();
+            }
             if (!requested) {                                   /* menu: d-pad picks, OK plays */
                 if (ev.btn == UARTKBD_BTN_NAV_UP) menu_move(-1);
                 else if (ev.btn == UARTKBD_BTN_NAV_DOWN) menu_move(1);
@@ -1096,6 +1315,7 @@ int main(void) {
             menu_poll();
             next_menu_us = time_us_64() + 500000u;
         }
+        if (!changed) mq_task();                          /* marquee: draw, read a piece; buttons first */
         if (now >= next_report_us && audio_ok)          /* audio stats on the link line, once a second */
             line(ROW_LINK, C_GREY, "L%d AU %lu U%lu D%lu P%lu R%lu %luMS", au_pp, (unsigned long)au_rate,
                  (unsigned long)au_under, (unsigned long)au_drops, (unsigned long)au_dups,

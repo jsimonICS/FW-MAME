@@ -21,6 +21,6 @@ target_link_libraries(fwmame freewili2_bsp onewili_fwgui hardware_resets hardwar
 # zone has no POWER_ZONES name; main.c holds it with picpwr.
 fw2_display_app(fwmame
     POWER_ZONES SENSORS DISPLAY SDCARD USB_HUB AUDIO
-    VERSION 005
+    VERSION 008
     DESCRIPTION "FW-MAME: loads the framebuffer FPGA design and sends the FW2 buttons and a USB stick to the CM0"
     REPOSITORY "https://github.com/jsimonICS/FW-MAME")

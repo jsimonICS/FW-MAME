@@ -3,3 +3,4 @@ __pycache__/
 /build-fw2/
 # Game ROMs: never commit (copyright of their owners)
 /roms/
+/build-marquees/

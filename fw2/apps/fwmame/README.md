@@ -35,16 +35,51 @@ The FW-MAME console app for the FreeWili 2's display CPU. It:
   - A game the CM0 can't start (a ROM set that doesn't match) shows as
     "<GAME> FAILED", and the menu stays.
 
-The screen has five status lines (FPGA, audio, input writes, USB, raw/learn),
-the game list, VOL-/VOL+ (and LEARN STICK when a HID stick is plugged in),
-and the five colored buttons, lit while held. Audio line: rate, underruns (U),
-dropped (D) and repeated (P) samples, resyncs (R), worst read time. The
-labels over the colored buttons show FW-MAME's default mapping (COIN, START,
-B1, B2, B3), which lives on the CM0. Holding PAGE for 5 s shows About.
+From the top, the screen has:
+- **The marquee** of the game under the cursor (or the one playing), with
+  the state line in small text under it. A game without a marquee shows its
+  name. Tap **PAGE** to switch this band to the five status lines and back.
+  The status lines also show while the app starts and while it learns a USB
+  stick.
+- The game list.
+- VOL-/VOL+ (and LEARN STICK when a HID stick is plugged in).
+- The five colored buttons, lit while held. Their labels show FW-MAME's
+  default mapping (COIN, START, B1, B2, B3), which lives on the CM0.
 
-**Start the CM0 before the app.** While the app runs, MAIN's CM0 power-on
-(`l\a`) doesn't stick, but a CM0 that is already running stays on. To be
-fixed by having the app hold the CM0's power zone itself.
+Status lines: FPGA state; audio (L = level, then rate, underruns U, dropped D
+and repeated P samples, resyncs R, worst read time); input writes; USB; raw
+report or learn prompt. Holding PAGE for 5 s shows About.
+
+**Starting from the Apps menu:** the app switches the CM0's Linux on if it is
+off (MAIN's `l\a`, only after MAIN's shell answers `EPOWERZONE`) and starts
+`fwmame.service` through MAIN's Linux shell. It never touches power zone 17:
+that rail is MAIN's (wilibsp `docs/drivers/power.md`). On a cold CM0 this can
+take a few minutes: MAIN's shell sometimes returns no output for a while.
+
+## Marquees
+
+The marquee of the game under the cursor shows on the FW2 screen and, while
+the menu is up, full width on the CRT. `tools/marquees.py` makes both sets
+from `roms/marquees/<name>.png` (the parent set's name works for a clone):
+
+```sh
+python tools/marquees.py build        # roms/*.zip -> build-marquees/{fw2,crt}/*.fmq (needs Pillow)
+python tools/marquees.py install --wilibsp <wilibsp> --port COM14   # FW2 SD card
+python tools/marquees.py install-cm0  # CRT set -> CM0 ~/fwmame/marquees (scp)
+```
+
+Quit FW-MAME on the FW2 before `install`: it hands the SD card to the PC.
+The FW2 set goes to `/appdata/fwmame/marquees/<rom>.fmq` on the SD card. For
+the CRT, the app sends the cursor's game in input byte 6 (`0x80 | game` while
+in the menu) and the CM0's menu supervisor draws `~/fwmame/marquees/<rom>.fmq`
+in a 320x200 picture: up to 320x200, dithered to one fixed 256-colour
+palette that the FPGA's RGB333 palette shows exactly.
+Each file is scaled to fit 472x100, in 256 colours, run-length compressed
+(13-39 KB). Art that isn't a banner (Mappy's is cabinet art) is cropped to a
+band from its top. The app reads the SD card through MAIN in small pieces
+from its main loop: the marquee under the cursor first, then the rest while
+the menu is idle, keeping each in PSRAM. Nothing is read while a game runs,
+since MAIN's link carries the game's audio then.
 
 ## USB controller (work in progress)
 
