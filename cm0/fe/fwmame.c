@@ -30,10 +30,15 @@
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <math.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
+#include <dirent.h>
+#include <errno.h>
+#include <strings.h>
+#include <sys/wait.h>
 
 #define MAXW 640
 #define MAXH 480
@@ -162,6 +167,7 @@ static unsigned pend_w, pend_h;
 static bool pend_ready;
 static uint8_t inputs[8];                            // newest from the FPGA (under mx)
 static unsigned long emu_frames, dup_frames;
+static bool check_only;              // --check: load the game, no FPGA (with --seconds: run it, report audio)
 static double t_handoff;                             // time the core thread waited for the sender
 
 static inline uint16_t px565(const void *row, unsigned x) {
@@ -181,6 +187,7 @@ static inline uint16_t px565(const void *row, unsigned x) {
 static void video_refresh(const void *data, unsigned w, unsigned h, size_t pitch) {
     emu_frames++;
     if (!data) { dup_frames++; return; }             // frame unchanged
+    if (check_only) return;                          // --check: no display
     if (w > MAXW) w = MAXW;
     if (h > MAXH) h = MAXH;
     const double tw = now_s();
@@ -210,12 +217,30 @@ static unsigned aq_n;                                // queued samples (under mx
 static unsigned long aq_dropped;
 static double in_rate = 48000.0, rs_pos;             // resampler: position between in samples
 static int16_t rs_prev;
+static int au_peak;                                  // loudest core sample since the last report
+static int au_min = 32767, au_max = -32768;          // --check: sample range and AC energy per second
+static double au_sum, au_sq; static unsigned long au_cnt;
+
+// DC blocker (one-pole high-pass, about 16 Hz at 22 kHz) ahead of the resampler.
+// Many cores' output never goes below zero: Carnival's sits at a third of full
+// scale and clips at the top. That offset reaches the FW2's speaker amplifier as
+// a steady push, and it played Carnival as silence. Centred, the same music plays.
+static double dc_x1, dc_y1;
 
 static void resample_push(const int16_t *stereo, size_t frames) {
     const double step = in_rate / 16000.0;           // input samples per output sample
+    const double dc_r = 1.0 - 2.0 * 3.14159265 * 16.0 / in_rate;
     pthread_mutex_lock(&mx);
     for (size_t i = 0; i < frames; i++) {
-        const int16_t cur = (int16_t)(((int)stereo[2 * i] + stereo[2 * i + 1]) / 2);
+        const double raw = ((int)stereo[2 * i] + stereo[2 * i + 1]) / 2.0;
+        double y = raw - dc_x1 + dc_r * dc_y1;
+        dc_x1 = raw;
+        dc_y1 = y;
+        if (y > 32767.0) y = 32767.0;
+        if (y < -32768.0) y = -32768.0;
+        const int16_t cur = (int16_t)y;
+        if (abs(cur) > au_peak) au_peak = abs(cur);
+        if (check_only) { if (cur < au_min) au_min = cur; if (cur > au_max) au_max = cur; au_sum += cur; au_sq += (double)cur * cur; au_cnt++; }
         while (rs_pos < 1.0) {                       // output samples falling between prev and cur
             const int s = (int)(rs_prev + (cur - rs_prev) * rs_pos);
             if (aq_n < AQ_SIZE) aq[aq_n++] = (int16_t)s;
@@ -252,8 +277,8 @@ static void input_poll(void) {
     MAP(b >> FWFB_BTN_BLUE & 1 || p >> FWFB_PAD_B & 1, RETRO_DEVICE_ID_JOYPAD_A);
     MAP(b >> FWFB_BTN_RED & 1 || p >> FWFB_PAD_X & 1, RETRO_DEVICE_ID_JOYPAD_Y);
     MAP(b >> FWFB_BTN_NAV_CENTER & 1 || p >> FWFB_PAD_Y & 1, RETRO_DEVICE_ID_JOYPAD_X);
-    MAP(b >> FWFB_BTN_OK & 1 || p >> FWFB_PAD_L & 1, RETRO_DEVICE_ID_JOYPAD_L);
-    MAP(b >> FWFB_BTN_CANCEL & 1 || p >> FWFB_PAD_R & 1, RETRO_DEVICE_ID_JOYPAD_R);
+    MAP(p >> FWFB_PAD_L & 1, RETRO_DEVICE_ID_JOYPAD_L);   // FW2 OK / CANCEL arrive as GREEN / BLUE
+    MAP(p >> FWFB_PAD_R & 1, RETRO_DEVICE_ID_JOYPAD_R);   // (the display app maps them in a game)
 #undef MAP
     if (j != joy_bits) fprintf(stderr, "[fwmame] RetroPad bits %04x (FW2 %04x, pad %04x)\n", j, b, p);
     joy_bits = j;
@@ -337,11 +362,17 @@ static void dump_frame(const uint16_t *src, unsigned w, unsigned h, const uint8_
 // ---------------------------------------------------------------- sender thread
 static long spi_hz = 50000000;
 static double t_conv, t_send, t_flip;
+static int menu_id;                  // started from the menu as game n (--menu-id): stop when not requested
+static int flip_fail_run;            // consecutive failed flips: the FPGA went away (QUIT on the FW2)
 
 static void *sender(void *arg) {
     (void)arg;
     fwfb *fb = fwfb_open(spi_hz);
     if (!fb) { running = 0; pthread_cond_broadcast(&cv_taken); return NULL; }
+    if (menu_id) {                                    // tell the FW2 app this game is running
+        const uint8_t hdr[2] = {(uint8_t)menu_id, 0};
+        fwfb_menu(fb, 2, hdr, 2);
+    }
     static uint8_t px[65536];
     unsigned cur_w = 0, cur_h = 0;
     while (running) {
@@ -389,18 +420,145 @@ static void *sender(void *arg) {
         double t1 = now_s();
         fwfb_pixels(fb, 0, px, (size_t)fw * fh);
         double t2 = now_s();
-        if (fwfb_flip(fb)) flip_timeouts++;
+        if (fwfb_flip(fb)) {
+            flip_timeouts++;
+            if (++flip_fail_run > 30) {                  // ~5 s without the FPGA: fbuf is gone
+                fprintf(stderr, "[fwmame] the FPGA stopped answering: stopping\n");
+                running = 0;
+            }
+        } else {
+            flip_fail_run = 0;
+        }
         double t3 = now_s();
         uint8_t in[8];
         fwfb_inputs(fb, in);
         pthread_mutex_lock(&mx);
         memcpy(inputs, in, 8);
         pthread_mutex_unlock(&mx);
+        if (menu_id && in[6] != menu_id) {               // HOME on the FW2, or another game chosen
+            fprintf(stderr, "[fwmame] menu asks for game %u: stopping\n", in[6]);
+            running = 0;
+        }
         t_conv += t1 - t0; t_send += t2 - t1; t_flip += t3 - t2;
         sent++;
     }
+    pthread_mutex_lock(&mx);                          // the core thread may be waiting on us
+    pthread_cond_broadcast(&cv_taken);
+    pthread_mutex_unlock(&mx);
     fwfb_close(fb);
     return NULL;
+}
+
+// ---------------------------------------------------------------- menu supervisor (--menu DIR)
+// Publishes the zips in DIR as the game list (fbuf v004 menu memory, read by
+// the FW2 display app), shows black on the CRT, and waits for the app to
+// request a game (input byte 6). Each game then runs as a child process of
+// this program (`--menu-id n`), which exits when the request changes; the
+// supervisor republishes the list and waits again. A game that fails is not
+// restarted until the request changes.
+#define MENU_MAX 63
+static int name_cmp(const void *a, const void *b) { return strcmp(*(char *const *)a, *(char *const *)b); }
+
+// --idle-exit N: stop when the FPGA (fbuf) has been silent for N seconds after
+// answering once (the FW2 app's QUIT restored the stock gateware), or when it
+// never answers within 2 minutes of starting.
+static int idle_exit;
+static double t_fpga_seen, t_supervisor_start;
+static bool fpga_answered;
+static void fpga_seen(void) { t_fpga_seen = now_s(); fpga_answered = true; }
+static bool idle_gone(void) {
+    if (!idle_exit) return false;
+    const double t = now_s();
+    if (fpga_answered ? t - t_fpga_seen > idle_exit : t - t_supervisor_start > 120) {
+        fprintf(stderr, "[fwmame] menu: no FPGA for %s: exiting\n", fpga_answered ? "a while" : "2 minutes");
+        return true;
+    }
+    return false;
+}
+
+static int supervisor(const char *core_path, const char *romdir) {
+    char self[512];
+    ssize_t sl = readlink("/proc/self/exe", self, sizeof self - 1);
+    if (sl <= 0) { perror("readlink"); return 1; }
+    self[sl] = '\0';
+    uint8_t serial = 0;
+    int failed = 0;                                   // game that just failed: wait for the request to change
+    t_supervisor_start = now_s();
+    while (running) {
+        // the list: sorted *.zip names
+        static char *files[MENU_MAX];
+        int n = 0;
+        DIR *d = opendir(romdir);
+        if (!d) { perror(romdir); return 1; }
+        for (struct dirent *e; (e = readdir(d)) && n < MENU_MAX;) {
+            size_t len = strlen(e->d_name);
+            if (len > 4 && !strcasecmp(e->d_name + len - 4, ".zip")) files[n++] = strdup(e->d_name);
+        }
+        closedir(d);
+        qsort(files, (size_t)n, sizeof files[0], name_cmp);
+        static uint8_t menu[64 * 32];
+        memset(menu, 0, sizeof menu);
+        menu[0] = (uint8_t)n;
+        menu[1] = ++serial;
+        menu[3] = (uint8_t)failed;                    // the app shows "<game> FAILED"
+        for (int i = 0; i < n; i++) {                 // page i+1: upper-case name without .zip
+            char *p = (char *)menu + 32 * (i + 1);
+            for (size_t k = 0; k < 31 && files[i][k] && strcmp(files[i] + k, ".zip") && strcmp(files[i] + k, ".ZIP"); k++)
+                p[k] = (char)(files[i][k] >= 'a' && files[i][k] <= 'z' ? files[i][k] - 32 : files[i][k]);
+        }
+        fwfb *fb = fwfb_open(spi_hz);
+        if (!fb) {                                    // no fbuf (yet, or any more)
+            for (int i = 0; i < n; i++) free(files[i]);
+            if (idle_gone()) return 0;
+            sleep(1);
+            continue;
+        }
+        fpga_seen();
+        static uint8_t black[256 * 224];
+        const uint16_t pal0 = 0;
+        fwfb_mode(fb, 256, 224, 0);
+        fwfb_palette(fb, 0, 1, &pal0);
+        fwfb_pixels(fb, 0, black, sizeof black);
+        fwfb_flip(fb);
+        fwfb_menu(fb, 0, menu, 32 * ((size_t)n + 1));
+        fprintf(stderr, "[fwmame] menu: %d games published (serial %u)\n", n, serial);
+        int req = 0;
+        while (running) {
+            if (fwfb_wait_status(fb, 200) < 0) {
+                if (idle_gone()) { running = 0; break; }
+                continue;
+            }
+            fpga_seen();
+            uint8_t in[8];
+            fwfb_inputs(fb, in);
+            if (in[6] != failed) failed = 0;
+            if (in[6] >= 1 && in[6] <= n && in[6] != failed) { req = in[6]; break; }
+        }
+        fwfb_close(fb);
+        if (req) {
+            char id[8], hz[16], rom[1024];
+            snprintf(id, sizeof id, "%d", req);
+            snprintf(hz, sizeof hz, "%ld", spi_hz);
+            snprintf(rom, sizeof rom, "%s/%s", romdir, files[req - 1]);
+            fprintf(stderr, "[fwmame] menu: starting %s\n", rom);
+            pid_t pid = fork();
+            if (pid == 0) {
+                execl(self, self, core_path, rom, "--menu-id", id, "--hz", hz, (char *)NULL);
+                _exit(127);
+            }
+            int status = 0;
+            while (pid > 0 && waitpid(pid, &status, 0) < 0 && errno == EINTR) {
+                if (!running) kill(pid, SIGTERM);     // Ctrl+C: stop the game too
+            }
+            fpga_seen();                              // the game had the FPGA until now
+            if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+                fprintf(stderr, "[fwmame] menu: %s failed (status %d)\n", files[req - 1], status);
+                failed = req;
+            }
+        }
+        for (int i = 0; i < n; i++) free(files[i]);
+    }
+    return 0;
 }
 
 // ---------------------------------------------------------------- main
@@ -411,17 +569,30 @@ static void *sym(const char *name) {
 }
 
 int main(int argc, char **argv) {
-    const char *core_path = NULL, *rom = NULL;
+    const char *core_path = NULL, *rom = NULL, *menu_dir = NULL;
     double seconds = 0;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--seconds") && i + 1 < argc) seconds = atof(argv[++i]);
         else if (!strcmp(argv[i], "--hz") && i + 1 < argc) spi_hz = atol(argv[++i]);
         else if (!strcmp(argv[i], "--dump") && i + 1 < argc) dump_at = strtoul(argv[++i], NULL, 0);
+        else if (!strcmp(argv[i], "--menu-id") && i + 1 < argc) menu_id = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--menu") && i + 1 < argc) menu_dir = argv[++i];
+        else if (!strcmp(argv[i], "--idle-exit") && i + 1 < argc) idle_exit = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--check")) check_only = true;
         else if (!core_path) core_path = argv[i];
         else if (!rom) rom = argv[i];
     }
+    if (core_path && menu_dir && !rom) {
+        struct sigaction sa;                          // no SA_RESTART: interrupt waitpid to stop the game
+        memset(&sa, 0, sizeof sa);
+        sa.sa_handler = on_signal;
+        sigaction(SIGINT, &sa, NULL);
+        sigaction(SIGTERM, &sa, NULL);
+        return supervisor(core_path, menu_dir);
+    }
     if (!core_path || !rom) {
-        fprintf(stderr, "usage: fwmame <core.so> <rom.zip> [--seconds N] [--hz N]\n");
+        fprintf(stderr, "usage: fwmame <core.so> <rom.zip> [--seconds N] [--hz N] [--dump N]\n"
+                        "       fwmame <core.so> --menu <romdir>     (game menu for the FW2 display app)\n");
         return 2;
     }
     const char *home = getenv("SUDO_USER") ? "/home/pi" : getenv("HOME");
@@ -465,6 +636,27 @@ int main(int argc, char **argv) {
     core.get_system_av_info(&av);
     fprintf(stderr, "[fwmame] %s: %ux%u (max %ux%u) at %.2f fps, pixel format %d\n", rom, av.geometry.base_width,
             av.geometry.base_height, av.geometry.max_width, av.geometry.max_height, av.timing.fps, (int)pixfmt);
+    if (check_only) {                                 // --check: the game loaded; no FPGA needed
+        fprintf(stderr, "[fwmame] check: %s loads\n", rom);
+        if (seconds > 0) {                            // run it offline: coin at 5 s, start at 7 s, audio peak per second
+            core.set_controller_port_device(0, RETRO_DEVICE_JOYPAD);
+            const unsigned fps = av.timing.fps > 1 ? (unsigned)(av.timing.fps + 0.5) : 60;
+            for (unsigned f = 0; f < (unsigned)(seconds * fps); f++) {
+                inputs[0] = (f >= 5 * fps && f < 5 * fps + 12) ? 1u << FWFB_BTN_GREY : 0;
+                if (f >= 7 * fps && f < 7 * fps + 12) inputs[0] |= 1u << FWFB_BTN_YELLOW;
+                core.run();
+                if ((f + 1) % fps == 0) {
+                    const double mean = au_cnt ? au_sum / au_cnt : 0, ac = au_cnt ? sqrt(au_sq / au_cnt - mean * mean) : 0;
+                    fprintf(stderr, "[fwmame] check: %2u s audio %lu in frames, min %6d max %6d mean %8.1f ac rms %7.1f\n",
+                            (f + 1) / fps, au_cnt, au_min, au_max, mean, ac);
+                    au_peak = 0; au_min = 32767; au_max = -32768; au_sum = au_sq = 0; au_cnt = 0;
+                }
+            }
+        }
+        core.unload_game();
+        core.deinit();
+        return 0;
+    }
     core.set_controller_port_device(0, RETRO_DEVICE_JOYPAD);
     if (av.timing.sample_rate > 1000) in_rate = av.timing.sample_rate;
     fprintf(stderr, "[fwmame] audio %.0f Hz -> 16000 Hz mono\n", in_rate);
@@ -484,13 +676,14 @@ int main(int argc, char **argv) {
         if (now_s() >= t_report) {
             double dt = now_s() - t_report + 5;
             fprintf(stderr, "[fwmame] emu %.1f fps (core %.1f ms/frame), sent %.1f fps, dupes %lu, colours %d (misses %lu),"
-                    " convert %.1f ms, send %.1f ms, flip wait %.1f ms, flip timeouts %lu\n",
+                    " convert %.1f ms, send %.1f ms, flip wait %.1f ms, flip timeouts %lu, audio peak %d\n",
                     (emu_frames - last_emu) / dt,
                     emu_frames > last_emu ? (t_run - t_handoff) * 1e3 / (emu_frames - last_emu) : 0,
                     (sent - last_sent) / dt, dup_frames, pal_used, pal_misses,
                     sent > last_sent ? t_conv * 1e3 / (sent - last_sent) : 0,
                     sent > last_sent ? t_send * 1e3 / (sent - last_sent) : 0,
-                    sent > last_sent ? t_flip * 1e3 / (sent - last_sent) : 0, flip_timeouts);
+                    sent > last_sent ? t_flip * 1e3 / (sent - last_sent) : 0, flip_timeouts, au_peak);
+            au_peak = 0;
             last_emu = emu_frames; last_sent = sent; t_run = t_conv = t_send = t_flip = t_handoff = 0;
             t_report = now_s() + 5;
         }

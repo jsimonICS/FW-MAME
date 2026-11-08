@@ -16,7 +16,18 @@ the FW-MAME framebuffer ([cm0/fb](../fb), [fpga/fbuf](../../fpga/fbuf)):
   | Nav pad | d-pad | joystick |
   | Grey / Yellow | SELECT / START | coin / start |
   | Green / Blue / Red | B / A / Y | buttons 1 / 2 / 3 |
-  | Nav center / OK / CANCEL | X / L / R | buttons 4 / 5 / 6 |
+  | Nav center | X | button 4 |
+  | OK (✓) / CANCEL (✗) | sent as Green / Blue by the display app | buttons 1 / 2 |
+
+- **Game menu** (`--menu <romdir>`, what `run.sh` does with no game): a
+  supervisor publishes the zips in the folder as the game list in the FPGA's
+  menu memory (`fwfb_menu()`, fbuf v004), which the FW2 display app shows. It
+  shows black on the CRT and waits for the app to request a game (input byte
+  6). It then runs the game as a child process (`--menu-id n`), which exits
+  when the request changes (HOME on the FW2, or another game). A game that
+  fails is reported in the list header (byte 3) and not retried until it's
+  picked again. Each game runs in a fresh process, so the core never has to
+  unload and reload cleanly.
 
 - **Audio:** the core's stereo samples are resampled to 16 kHz mono and sent
   before each frame. The FW2 display app plays them (fbuf v003+). The core is
@@ -36,7 +47,8 @@ scp -i ~/.ssh/fw2_cm0 roms/mappy.zip pi@10.12.194.1:fwmame/roms/
 
 # on the CM0
 make -C ~/fwmame/src/fe
-~/fwmame/run.sh mappy                  # Ctrl+C to stop; --seconds N, --dump N
+~/fwmame/run.sh                        # game menu: pick games on the FW2 screen
+~/fwmame/run.sh mappy                  # or one game; Ctrl+C to stop; --seconds N, --dump N
 ```
 
 `run.sh` stops fwcm0-bridge, reloads spidev with 64 KB buffers and sets the

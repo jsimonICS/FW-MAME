@@ -33,6 +33,7 @@
 #include "platform/diag.h"
 #include "pico/stdlib.h"
 #include "hardware/dma.h"
+#include "hardware/watchdog.h"
 #include "onewili.h"
 #include "onewili_fwgui.h"
 #include "onewili_sd.h"
@@ -68,10 +69,10 @@ static inline uint16_t be16(uint16_t c) { return (uint16_t)((c >> 8) | (c << 8))
 #define C_CYAN  be16(0x07FF)
 
 enum { ROW_STATE, ROW_LINK, ROW_STATS, ROW_USB, ROW_RAW, ROW_COUNT };
-#define ROW_Y(r) (30 + (r) * 20)
+#define ROW_Y(r) (26 + (r) * 18)
 
 static void line(int row, uint16_t fg, const char *fmt, ...) {
-    char s[30];
+    char s[40];
     va_list ap;
     va_start(ap, fmt);
     vsnprintf(s, sizeof s, fmt, ap);
@@ -80,25 +81,33 @@ static void line(int row, uint16_t fg, const char *fmt, ...) {
     st7796_draw_text(8, ROW_Y(row), 2, fg, C_BLACK, s);
 }
 
-/* ---- button panel: each of the 14 buttons as a box, lit while held ---- */
-typedef struct { int x, y, w, h; const char *label; } key_box;
-static const key_box keys[UARTKBD_BTN_COUNT] = {
-    [UARTKBD_BTN_GREY]       = {0},   /* the coloured five use the bottom bar */
-    [UARTKBD_BTN_NAV_UP]     = {70, 134, 40, 34, "U"},
-    [UARTKBD_BTN_NAV_DOWN]   = {70, 214, 40, 34, "D"},
-    [UARTKBD_BTN_NAV_LEFT]   = {26, 174, 40, 34, "L"},
-    [UARTKBD_BTN_NAV_RIGHT]  = {114, 174, 40, 34, "R"},
-    [UARTKBD_BTN_NAV_CENTER] = {70, 174, 40, 34, "C"},
-    [UARTKBD_BTN_HOME]       = {200, 136, 120, 30, "HOME"},
-    [UARTKBD_BTN_OK]         = {330, 136, 120, 30, "OK"},
-    [UARTKBD_BTN_CANCEL]     = {200, 174, 120, 30, "CANCEL"},
-    [UARTKBD_BTN_PAGE]       = {330, 174, 120, 30, "PAGE"},
-};
-/* Touch target: learn the USB stick's controls again. */
-#define LEARN_X 200
-#define LEARN_Y 214
-#define LEARN_W 250
-#define LEARN_H 34
+static void line_at(int y, uint16_t fg, const char *fmt, ...) {
+    char s[30];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(s, sizeof s, fmt, ap);
+    va_end(ap);
+    st7796_fill_rect(8, y, 464, 16, C_BLACK);
+    st7796_draw_text(8, y, 2, fg, C_BLACK, s);
+}
+
+/* ---- game menu state (the list itself comes from the CM0 through the FPGA) ---- */
+static uint8_t requested;             /* game asked for (input byte 6), 0 = menu */
+static uint8_t cm0_running;           /* game the CM0 reports running, 0 = none */
+static int game_count = -1;           /* -1 = list not read yet */
+static uint8_t game_serial;
+static char game_names[63][32];
+static int cursor, list_top;
+static uint8_t failed_game;           /* last game the CM0 couldn't start, shown until the next pick */
+#define LIST_Y     118                 /* header line, then LIST_ROWS games */
+#define LIST_ROW_H 20
+#define LIST_ROWS  5
+
+/* Touch target: learn the USB stick's controls again (shown with a HID stick). */
+#define LEARN_X 8
+#define LEARN_Y 250
+#define LEARN_W 180
+#define LEARN_H 26
 
 /* The five coloured buttons: boxes directly above them (wilibsp AGENTS.md),
  * in wire-order colours, labelled with FW-MAME's default mapping. Held =
@@ -114,19 +123,10 @@ static void draw_bar_button(int i, bool held) {
     st7796_draw_text(x + 10, y + 12, 2, fg, bg, bar_label[i]);
 }
 
+/* Only the five coloured buttons are shown (the menu takes the rest of the screen). */
 static void draw_buttons(void) {
-    for (int b = 0; b < UARTKBD_BTN_COUNT; b++) {
-        const bool held = (buttons >> b) & 1u;
-        if (!(((shown ^ buttons) >> b) & 1u)) continue;
-        if (b <= UARTKBD_BTN_RED) {
-            draw_bar_button(b, held);
-        } else {
-            const key_box *k = &keys[b];
-            const uint16_t bg = held ? C_CYAN : C_DARK, fg = held ? C_BLACK : C_GREY;
-            st7796_fill_rect(k->x, k->y, k->w, k->h, bg);
-            st7796_draw_text(k->x + 6, k->y + (k->h - 16) / 2, 2, fg, bg, k->label);
-        }
-    }
+    for (int b = 0; b <= UARTKBD_BTN_RED; b++)
+        if (((shown ^ buttons) >> b) & 1u) draw_bar_button(b, (buttons >> b) & 1u);
     shown = buttons;
 }
 
@@ -454,7 +454,7 @@ static void show_usb(void) {
 static void draw_learn_button(void) {
     const bool on = hid_present && !x_present;
     st7796_fill_rect(LEARN_X, LEARN_Y, LEARN_W, LEARN_H, on ? C_GREY : C_BLACK);
-    if (on) st7796_draw_text(LEARN_X + 10, LEARN_Y + 9, 2, C_BLACK, C_GREY, "LEARN STICK");
+    if (on) st7796_draw_text(LEARN_X + 10, LEARN_Y + 5, 2, C_BLACK, C_GREY, "LEARN STICK");
 }
 
 /* Pad bits and stick from whichever controller is present. */
@@ -480,12 +480,19 @@ static void pad_update(void) {
     stick_y = sy;
 }
 
-/* One h\f\w with all 8 input bytes (bare hex tokens); the write to 0x37 commits. */
+/* One h\f\w with all 8 input bytes (bare hex tokens); the write to 0x37 commits.
+ * In a game, OK (the check mark) also presses B1 (GREEN) and CANCEL (the X) also
+ * presses B2 (BLUE). Byte 6 is the game requested from the menu. */
 static bool write_inputs(void) {
     char cmd[64];
+    uint16_t b = buttons;
+    if (requested) {
+        if (b >> UARTKBD_BTN_OK & 1u) b |= 1u << UARTKBD_BTN_GREEN;
+        if (b >> UARTKBD_BTN_CANCEL & 1u) b |= 1u << UARTKBD_BTN_BLUE;
+    }
     counter++;
-    snprintf(cmd, sizeof cmd, "h\\f\\w %02X %02X %02X %02X %02X %02X %02X 00 %02X", REG_INPUTS, buttons & 0xFFu,
-             buttons >> 8, pad_bits & 0xFFu, pad_bits >> 8, (uint8_t)stick_x, (uint8_t)stick_y, counter);
+    snprintf(cmd, sizeof cmd, "h\\f\\w %02X %02X %02X %02X %02X %02X %02X %02X %02X", REG_INPUTS, b & 0xFFu,
+             b >> 8, pad_bits & 0xFFu, pad_bits >> 8, (uint8_t)stick_x, (uint8_t)stick_y, requested, counter);
     const uint64_t t0 = time_us_64();
     const bool ok = call("INPUTS", cmd, 500);
     last_ms = (uint32_t)((time_us_64() - t0) / 1000u);
@@ -537,6 +544,7 @@ static uint8_t au_low;                 /* a sample's low byte left over from the
 static uint32_t au_bytes, au_reads, au_under, au_drops, au_dups, au_last_ms, au_worst_ms, au_n, au_resync;
 static uint64_t au_next_us, au_rate_t0;
 static uint32_t au_rate_bytes, au_rate;   /* bytes/s over the last second */
+static int au_lo = 32767, au_hi = -32768, au_pp;   /* sample range; au_pp = peak-to-peak over the last second */
 
 static uint32_t au_pos(void) {
     for (int i = 0; i < 2; i++) {
@@ -589,6 +597,8 @@ static void au_samples(const uint8_t *b, int n) {
         int v = au_low | ((b[i] >> 1) << 7);                     /* 14-bit two's complement */
         if (v & 0x2000) v -= 0x4000;
         const int16_t s = (int16_t)(v << 2);
+        if (s < au_lo) au_lo = s;
+        if (s > au_hi) au_hi = s;
         const uint32_t level = (au_wp - au_pos()) & (AU_FRAMES - 1u);
         au_n++;
         if (level > AU_FRAMES - AU_GUARD) {            /* the DMA passed us: start over ahead of it */
@@ -618,10 +628,36 @@ static int hex_bytes(const char *s, uint8_t *out, int max) {
     return n;
 }
 
+/* The DMA loops over the whole ring forever, so when the samples stop (HOME
+ * stops the game, QUIT, a link hiccup) it would replay the last 256 ms over and
+ * over. On a tick that brings no samples, zero everything the DMA has already
+ * played: from the write point up to just behind the read point. Those frames
+ * are stale, so this is always safe. Once the DMA overtakes the write point,
+ * all of the ring is stale. */
+static bool au_clear_stale(void) {                /* true: the whole ring is silent now */
+    const uint32_t pos = au_pos(), level = (au_wp - pos) & (AU_FRAMES - 1u);
+    if (level > AU_FRAMES - AU_GUARD) { memset(au_ring, 0, sizeof au_ring); return true; }
+    const uint32_t margin = 8u;                    /* stay clear of the frames being read */
+    const uint32_t stale = AU_FRAMES - level;
+    for (uint32_t k = 0, w = au_wp; k + margin < stale; k++, w = (w + 1u) & (AU_FRAMES - 1u)) au_ring[w] = 0;
+    return false;                                  /* samples still queued: clear again next tick */
+}
+
+static void audio_poll(uint64_t now);
+
 static void audio_task(void) {
     const uint64_t now = time_us_64();
-    if (!audio_ok || !running || now < au_next_us) return;
+    if (!audio_ok || now < au_next_us) return;
     au_next_us = now + 4000u;
+    static bool clean = true;                      /* the whole ring is silent */
+    const uint32_t n0 = au_n;
+    audio_poll(now);
+    if (au_n != n0) clean = false;
+    else if (!clean) clean = au_clear_stale();
+}
+
+static void audio_poll(uint64_t now) {
+    if (!running) return;
     static bool flushed;
     if (!flushed) flushed = call("AUFLUSH", "h\\f\\w 63 01", 300);   /* start clean: drop what piled up */
     uint8_t b[260];
@@ -645,15 +681,252 @@ static void audio_task(void) {
     if (now - au_rate_t0 >= 1000000u) {
         au_rate = au_rate_bytes;
         au_rate_bytes = 0;
+        au_pp = au_hi >= au_lo ? au_hi - au_lo : 0;
+        au_lo = 32767;
+        au_hi = -32768;
         au_rate_t0 = now;
     }
 }
 
+/* ======================================================= game menu
+ * The CM0 (cm0/fe, `run.sh` with no game) writes its game list into the FPGA's
+ * menu memory (fbuf v004): page 0 = {count, serial, running game}, page n =
+ * game n's name. Reading a page: write its number to 0x39, read 0x40-0x5F.
+ * Picking a game sets input byte 6 to its number; HOME sets it back to 0. */
+static bool menu_page(int page, uint8_t out[32]) {
+    char cmd[24];
+    snprintf(cmd, sizeof cmd, "h\\f\\w 39 %02X", page);
+    if (!call("MPAGE", cmd, 300)) return false;
+    sleep_us(50);                                     /* the window fills ~1 us after the write */
+    return call("MREAD", "h\\f\\r 40 32", 300) && hex_bytes(reply, out, 32) == 32;
+}
+
+static const char *game_name(int id) {               /* 1-based */
+    return (id >= 1 && id <= game_count) ? game_names[id - 1] : "?";
+}
+
+/* The games, then QUIT FW-MAME (once the list has been read). */
+static int menu_items(void) { return game_count < 0 ? 0 : game_count + 1; }
+
+static void draw_menu(void) {
+    st7796_fill_rect(0, LIST_Y, ST7796_W, LIST_ROW_H * (LIST_ROWS + 1), C_BLACK);
+    if (requested && cm0_running == requested)
+        line_at(LIST_Y, C_GREEN, "PLAYING %s  HOME=MENU", game_name(requested));
+    else if (requested)
+        line_at(LIST_Y, C_WHITE, "STARTING %s...", game_name(requested));
+    else if (cm0_running)
+        line_at(LIST_Y, C_WHITE, "STOPPING %s...", game_name(cm0_running));
+    else if (game_count < 0)
+        line_at(LIST_Y, C_WHITE, "READING GAME LIST...");
+    else if (failed_game)
+        line_at(LIST_Y, C_RED, "%s FAILED", game_name(failed_game));
+    else if (game_count == 0)
+        line_at(LIST_Y, C_RED, "NO GAMES IN ~/FWMAME/ROMS");
+    else
+        line_at(LIST_Y, C_CYAN, "SELECT GAME, OK TO PLAY");
+    const int items = menu_items();
+    for (int i = 0; i < LIST_ROWS; i++) {
+        const int idx = list_top + i, y = LIST_Y + LIST_ROW_H * (i + 1);
+        if (idx >= items) break;
+        const bool sel = idx == cursor && !requested;
+        const bool quit = idx == game_count;         /* the last item */
+        const bool on = requested == idx + 1;
+        const uint16_t bg = sel ? C_CYAN : C_BLACK, fg = sel ? C_BLACK : on ? C_GREEN : quit ? C_GREY : C_WHITE;
+        st7796_fill_rect(0, y - 2, ST7796_W, LIST_ROW_H, bg);
+        char s[30];
+        snprintf(s, sizeof s, "%c %s", on ? '>' : ' ', quit ? "QUIT FW-MAME" : game_names[idx]);
+        st7796_draw_text(8, y, 2, fg, bg, s);
+    }
+}
+
+static void menu_move(int delta) {
+    const int items = menu_items();
+    if (items <= 0) return;
+    cursor += delta;
+    if (cursor < 0) cursor = 0;
+    if (cursor >= items) cursor = items - 1;
+    if (cursor < list_top) list_top = cursor;
+    if (cursor >= list_top + LIST_ROWS) list_top = cursor - LIST_ROWS + 1;
+    draw_menu();
+}
+
+/* Re-read the list when the CM0 republishes it (new serial) and follow the running game. */
+static void menu_poll(void) {
+    uint8_t p[32];
+    if (!menu_page(0, p)) return;
+    bool redraw = false;
+    if (game_count < 0 || p[1] != game_serial) {
+        const int n = p[0] > 63 ? 63 : p[0];
+        int got = 0;
+        for (; got < n; got++) {
+            uint8_t name[32];
+            if (!menu_page(got + 1, name)) break;
+            int k = 0;
+            for (; k < 26 && name[k]; k++) game_names[got][k] = (name[k] >= 32 && name[k] < 127) ? (char)name[k] : '?';
+            game_names[got][k] = '\0';
+        }
+        if (got == n) {
+            game_count = n;
+            game_serial = p[1];
+            if (cursor > game_count) cursor = 0;       /* game_count = the QUIT item */
+            if (list_top > cursor) list_top = cursor;
+            redraw = true;
+        }
+    }
+    if (p[2] != cm0_running) { cm0_running = p[2]; redraw = true; }
+    if (requested && p[3] == requested && !cm0_running) {   /* the CM0 couldn't start it */
+        failed_game = requested;
+        requested = 0;
+        redraw = true;
+        write_inputs();
+    }
+    if (redraw) draw_menu();
+}
+
+/* ======================================================= CM0 power and the game service
+ * Launching the app from the FW2's Apps menu has to bring up the CM0 side too:
+ *   1. the CM0 on: MAIN's l\a (a toggle, so only when h\p\g shows it off; the
+ *      app also holds zone 17, so its power frames don't switch it back off);
+ *   2. while the stock FPGA and fwcm0-bridge still run, a MAIN Linux-shell
+ *      session (l\c / l\w / l\r / l\e) runs `systemctl start --no-block
+ *      fwmame` (cm0/fe/fwmame.service: stops the bridge, runs the game menu
+ *      supervisor, and stops by itself once the FPGA goes quiet);
+ *   3. then fbuf is loaded. */
+#define SHELL_TOKEN "F3A3E001"
+
+/* h\p\g: is rail 17 (the CM0) on? Only the rail: the CM0_RUNPG readback said
+ * "held in reset" while Linux was running (wilibsp: that readback is not
+ * established), so Linux itself is proven by the shell check that follows. */
+static bool cm0_running_now(void) {
+    if (!call("ZONES", "h\\p\\g", 2000)) return false;
+    const char *z = strstr(reply, "17:CM0");
+    const char *eol = z ? strpbrk(z, "\r\n") : NULL;
+    const char *on = z ? strstr(z, " on") : NULL;
+    const bool up = on && (!eol || on < eol);
+    DIAG("fwmame: CM0 rail %s\n", z ? (up ? "on" : "off") : "not in reply");
+    return up;
+}
+
+static bool cm0_power_on(void) {
+    picpwr_keep_awake(picpwr_zone_bit(PICPWR_ZONE_COMPUTE));
+    if (cm0_running_now()) return true;
+    line(ROW_STATE, C_WHITE, "TURNING ON THE CM0...");
+    for (int attempt = 0; attempt < 2; attempt++) {  /* l\a toggles: if it answers "off", toggle again */
+        if (call("CM0ON", "l\\a", 3000) && strstr(reply, "ON")) break;
+    }
+    for (int waited = 0; waited < 10000; waited += 250) {
+        if (cm0_running_now()) return true;
+        fw2_app_recovery_sleep_ms(250);
+    }
+    return false;
+}
+
+static void shell_write(const char *text) {
+    char cmd[24 + 2 * 192];
+    int k = snprintf(cmd, sizeof cmd, "l\\w " SHELL_TOKEN " ");
+    for (const char *p = text; *p && k < (int)sizeof cmd - 3; p++) k += snprintf(cmd + k, sizeof cmd - (size_t)k, "%02X", (uint8_t)*p);
+    call("SHW", cmd, 2000);
+}
+
+/* Wait for the CM0's shell through MAIN (Linux boots in ~30 s) and start the service. */
+static bool start_game_service(void) {
+    line(ROW_STATE, C_WHITE, "WAITING FOR CM0 LINUX...");
+    for (int waited = 0; waited < 150000; waited += 3000) {
+        call("SHE", "l\\e " SHELL_TOKEN, 1000);
+        const bool opened = call("SHC", "l\\c " SHELL_TOKEN, 2000);
+        DIAG("fwmame: shell open %d: '%.60s'\n", (int)opened, reply);
+        if (opened) {
+            shell_write("echo FWMAME_\"\"OK\n");     /* the echo, not the typed command, matches */
+            static char acc[1600];                   /* hex of the shell output so far (reads may split it) */
+            acc[0] = '\0';
+            for (int i = 0; i < 8; i++) {
+                fw2_app_recovery_sleep_ms(250);
+                if (!call("SHR", "l\\r " SHELL_TOKEN " 192", 2000)) continue;
+                DIAG("fwmame: shell read '%.48s'\n", reply);
+                const char *hex = strchr(reply, ' ');   /* body: "<n> <hex>" */
+                size_t k = strlen(acc);
+                for (const char *p = hex ? hex + 1 : ""; *p && k < sizeof acc - 1; p++)
+                    if ((*p >= '0' && *p <= '9') || (*p >= 'A' && *p <= 'F') || (*p >= 'a' && *p <= 'f'))
+                        acc[k++] = (char)(*p >= 'a' ? *p - 32 : *p);
+                acc[k] = '\0';
+                if (strstr(acc, "46574D414D455F4F4B")) {             /* "FWMAME_OK": the shell answers */
+                    line(ROW_STATE, C_WHITE, "STARTING THE GAME SERVICE...");
+                    /* Detached, so closing this session (a hangup) can't kill it
+                     * before the job is queued; then wait for "FWMAME_GO". */
+                    shell_write("setsid sudo systemctl start --no-block fwmame </dev/null >/dev/null 2>&1 & "
+                                "sleep 1; echo FWMAME_\"\"GO\n");
+                    acc[0] = '\0';
+                    bool go = false;
+                    for (int j = 0; j < 40 && !go; j++) {   /* the login banner comes first */
+                        fw2_app_recovery_sleep_ms(250);
+                        if (!call("SHR", "l\\r " SHELL_TOKEN " 192", 2000)) continue;
+                        const char *h2 = strchr(reply, ' ');
+                        size_t m = strlen(acc);
+                        for (const char *p = h2 ? h2 + 1 : ""; *p && m < sizeof acc - 1; p++)
+                            if ((*p >= '0' && *p <= '9') || (*p >= 'A' && *p <= 'F') || (*p >= 'a' && *p <= 'f'))
+                                acc[m++] = (char)(*p >= 'a' ? *p - 32 : *p);
+                        acc[m] = '\0';
+                        go = strstr(acc, "46574D414D455F474F") != NULL;
+                    }
+                    DIAG("fwmame: game service start %s\n", go ? "confirmed" : "NOT confirmed");
+                    call("SHE", "l\\e " SHELL_TOKEN, 1000);
+                    return go;
+                }
+            }
+        }
+        fw2_app_recovery_sleep_ms(3000);
+    }
+    return false;
+}
+
 static void start(void) {
     line(ROW_STATE, C_WHITE, "STARTING...");
-    running = fbuf_running() || ((sd_file_current() || write_sd_file()) && load_design());
+    bool already = fbuf_running();
+    static bool first = true;
+    if (already && first) {
+        /* fbuf left loaded by an earlier run (an older app, or a HOME-hold exit):
+         * is the CM0's game service publishing? If no list appears in ~3 s,
+         * go back to the stock FPGA and start everything properly. */
+        bool alive = false;
+        for (int i = 0; i < 6 && !alive; i++) {
+            uint8_t p[32];
+            alive = menu_page(0, p) && p[1] != 0;     /* serial 0 = never published */
+            if (!alive) fw2_app_recovery_sleep_ms(500);
+        }
+        if (!alive) {
+            DIAG("fwmame: fbuf loaded but no game service: restarting from the stock FPGA\n");
+            line(ROW_STATE, C_WHITE, "RESTARTING FROM STOCK FPGA...");
+            call("RESTORE", "h\\f\\t", 5000);
+            already = false;
+        }
+    }
+    first = false;
+    DIAG("fwmame: start: fbuf %s\n", already ? "already running" : "not running");
+    if (!already) {                                  /* a fresh launch: bring up the CM0 side first */
+        const bool cm0 = cm0_power_on();
+        const bool svc = cm0 && start_game_service();
+        DIAG("fwmame: start: CM0 %d, game service %d\n", (int)cm0, (int)svc);
+        if (!cm0) line(ROW_STATE, C_RED, "CM0 DID NOT TURN ON");
+        else if (!svc) line(ROW_STATE, C_RED, "CM0 SHELL NOT REACHED");
+        running = (sd_file_current() || write_sd_file()) && load_design();
+    } else {
+        running = true;
+    }
     if (running) running = write_inputs();
     line(ROW_STATE, running ? C_GREEN : C_RED, running ? "FBUF V%u RUNNING" : "FPGA START FAILED", FWFPGA_VERSION);
+}
+
+/* QUIT: give the FW2 back. The stock FPGA returns; the CM0's game service sees
+ * the FPGA go quiet, stops, and restarts fwcm0-bridge. Then leave the app the
+ * way HOME-hold does (a watchdog reboot into the stock display firmware). */
+static void quit_app(void) {
+    line(ROW_STATE, C_WHITE, "RESTORING THE STOCK FPGA...");
+    requested = 0;
+    call("RESTORE", "h\\f\\t", 5000);
+    line(ROW_STATE, C_GREY, "BYE");
+    fw2_app_recovery_sleep_ms(300);
+    watchdog_reboot(0, 0, 10);
+    for (;;) tight_loop_contents();
 }
 
 static bool fpga_zone_up(void) {
@@ -715,9 +988,10 @@ int main(void) {
     show_usb();
     draw_learn_button();
     if (audio_ok) draw_volume();
+    draw_menu();
 
     uint64_t next_report_us = 0, next_check_us = time_us_64() + 2000000u, next_refresh_us = 0;
-    uint64_t next_usb_show_us = 0;
+    uint64_t next_usb_show_us = 0, next_menu_us = 0;
     bool was_touch = false, was_hid = false, was_x = false;
     for (;;) {
         fw2_app_recovery_task();
@@ -735,6 +1009,25 @@ int main(void) {
             if (learn >= 0 && ev.pressed && ev.btn == UARTKBD_BTN_GREY) {   /* skip this control */
                 map.rule[learn].op = OP_NONE;
                 learn_next();
+            }
+            if (!ev.pressed) continue;
+            if (!requested) {                                   /* menu: d-pad picks, OK plays */
+                if (ev.btn == UARTKBD_BTN_NAV_UP) menu_move(-1);
+                else if (ev.btn == UARTKBD_BTN_NAV_DOWN) menu_move(1);
+                else if (ev.btn == UARTKBD_BTN_NAV_LEFT) menu_move(-LIST_ROWS);
+                else if (ev.btn == UARTKBD_BTN_NAV_RIGHT) menu_move(LIST_ROWS);
+                else if (ev.btn == UARTKBD_BTN_OK && game_count >= 0 && cursor == game_count) {
+                    quit_app();                                 /* QUIT FW-MAME */
+                } else if (ev.btn == UARTKBD_BTN_OK && game_count > 0 && !cm0_running) {
+                    requested = (uint8_t)(cursor + 1);
+                    failed_game = 0;
+                    changed = true;
+                    draw_menu();
+                }
+            } else if (ev.btn == UARTKBD_BTN_HOME) {            /* in a game: HOME goes back to the menu */
+                requested = 0;
+                changed = true;
+                draw_menu();
             }
         }
 
@@ -799,8 +1092,12 @@ int main(void) {
                  (unsigned long)write_fails, (unsigned long)last_ms, (unsigned long)worst_ms);
         }
         audio_task();
+        if (running && now >= next_menu_us) {             /* game list and running game, twice a second */
+            menu_poll();
+            next_menu_us = time_us_64() + 500000u;
+        }
         if (now >= next_report_us && audio_ok)          /* audio stats on the link line, once a second */
-            line(ROW_LINK, C_GREY, "AU %lu U%lu D%lu P%lu R%lu %luMS", (unsigned long)au_rate,
+            line(ROW_LINK, C_GREY, "L%d AU %lu U%lu D%lu P%lu R%lu %luMS", au_pp, (unsigned long)au_rate,
                  (unsigned long)au_under, (unsigned long)au_drops, (unsigned long)au_dups,
                  (unsigned long)au_resync, (unsigned long)au_worst_ms);
         if (now >= next_report_us) {

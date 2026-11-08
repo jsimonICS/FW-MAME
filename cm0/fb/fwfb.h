@@ -17,7 +17,7 @@ enum { FWFB_WIDTH = 0, FWFB_HEIGHT = 1, FWFB_XSTART = 2, FWFB_YSTART = 3, FWFB_C
 //   bytes 0-1  FW2 buttons, a set bit = held (FWFB_BTN_*)
 //   bytes 2-3  USB controller buttons (FWFB_PAD_*), 0 when none is plugged in
 //   bytes 4-5  USB controller left stick X, Y (int8, 0 = centre), 0 when none
-//   byte 6     reserved, 0
+//   byte 6     game requested from the menu (fbuf v004 menu, 1..63), 0 = none
 //   byte 7     update counter: the app adds 1 on every write
 enum {
   FWFB_BTN_GREY = 0, FWFB_BTN_YELLOW, FWFB_BTN_GREEN, FWFB_BTN_BLUE, FWFB_BTN_RED,
@@ -51,6 +51,12 @@ int fwfb_pixels(fwfb *fb, unsigned addr, const uint8_t *px, size_t n);
 // bits 13:7 << 1 | 1. The FIFO drops single bytes when it is full; with the
 // marks the app re-locks on the next byte instead of turning the rest into noise.
 int fwfb_audio(fwfb *fb, const int16_t *samples, size_t n);
+// Bytes into the FPGA's 2 KB menu memory at an even offset (fbuf v004+), which
+// the FW2 display app reads: the game list. Layout: 64 pages of 32 bytes;
+// page 0 = {count, serial, running game (0 = none), game that failed to
+// start (0 = none), 0...}, page n = game n's
+// name, NUL-terminated. The app asks for game n through input byte 6.
+int fwfb_menu(fwfb *fb, unsigned offset, const uint8_t *data, size_t n);
 // Show the back buffer: sends FLIP and waits until the FPGA reports it done
 // (at the next vertical blank, at once if already in it). Returns 0, or -1 on timeout.
 int fwfb_flip(fwfb *fb);

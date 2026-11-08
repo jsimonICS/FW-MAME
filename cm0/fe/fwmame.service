@@ -1,0 +1,26 @@
+# fwmame.service - the FW-MAME game supervisor, started on demand by the FW2
+# display app (fw2/apps/fwmame) through MAIN's Linux shell:
+#   sudo systemctl start --no-block fwmame
+# Not enabled at boot: it stops fwcm0-bridge, which the stock FW2 GUI needs.
+# It stops by itself when the FPGA stops answering (the app's QUIT restores the
+# stock gateware), and then puts the bridge and the CPU governor back.
+# Install: sudo sh ~/fwmame/src/fe/install-service.sh
+[Unit]
+Description=FW-MAME game supervisor (started by the FW2 display app)
+
+[Service]
+Type=simple
+# fwcm0-bridge owns SPI0, the UART and GPIO21, and ignores SIGTERM (a plain
+# stop takes 90 s): kill it, then stop it so systemd doesn't restart it.
+ExecStartPre=-/bin/systemctl kill -s KILL fwcm0-bridge
+ExecStartPre=-/bin/systemctl stop fwcm0-bridge
+# 64 KB spidev transfers (a frame is one transfer) and a pinned core clock
+# (the SPI clock follows it).
+ExecStartPre=/bin/sh -c 'if [ "$(cat /sys/module/spidev/parameters/bufsiz)" -lt 65536 ]; then modprobe -r spidev && modprobe spidev bufsiz=65536 && sleep 1; fi'
+ExecStartPre=/bin/sh -c 'for g in /sys/devices/system/cpu/cpu[0-9]*/cpufreq/scaling_governor; do echo performance > "$g"; done'
+ExecStart=/home/pi/fwmame/src/fe/fwmame /home/pi/fwmame/cores/mame2003_plus_libretro.so --menu /home/pi/fwmame/roms --idle-exit 10
+ExecStopPost=/bin/sh -c 'for g in /sys/devices/system/cpu/cpu[0-9]*/cpufreq/scaling_governor; do echo ondemand > "$g"; done'
+ExecStopPost=/bin/systemctl --no-block start fwcm0-bridge
+Restart=no
+KillSignal=SIGTERM
+TimeoutStopSec=10

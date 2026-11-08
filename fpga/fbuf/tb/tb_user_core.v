@@ -186,6 +186,7 @@ integer   au_n = 0;
 always @(posedge clk) if (fifo_rx_valid && rx_ready) begin au_buf[au_n] = fifo_rx_data; au_n = au_n + 1; end
 
 reg [7:0]  v8;
+integer    n;
 reg [31:0] v32;
 integer t0, hs_len;
 
@@ -194,7 +195,7 @@ initial begin
   rst_n = 1'b1;
   repeat (4) @(posedge clk);
 
-  rreg(7'h12, v8); check(v8 == 8'd3, "revision");
+  rreg(7'h12, v8); check(v8 == 8'd4, "revision");
   rreg(7'h18, v8); check(v8 == 8'd0, "WIDTH reset low byte (256)");
   rreg(7'h19, v8); check(v8 == 8'd1, "WIDTH reset high byte (256)");
   rreg(7'h20, v8); check(v8 == 8'd5, "CPP reset");
@@ -302,9 +303,32 @@ initial begin
   r32(7'h3A, v32); check(v32 == 200, "audio byte counter");
   rreg(7'h3E, v8); check(v8 == 8'd4, "audio drops counted");
 
+  // ---- menu memory: 3 pages written by one MENU packet, read back through 0x39 / 0x40-0x5F ----
+  hdr(8'h06, 8'h00, 16'd0);
+  for (i = 0; i < 96; i = i + 1) pkt[4 + i] = (i < 32) ? 8'hA0 + i[7:0] : (i < 64) ? 8'h40 + i[7:0] : 8'hC0 ^ i[7:0];
+  spi_send(4 + 96);
+  for (n = 2; n >= 0; n = n - 1) begin
+    wreg(7'h39, n[7:0]);
+    repeat (24) @(posedge clk);
+    j = 0;
+    for (i = 0; i < 32; i = i + 1) begin
+      rreg(7'h40 + i, v8);
+      if (v8 !== pkt[4 + 32 * n + i]) j = j + 1;
+    end
+    check(j == 0, "menu page reads back");
+    $display("  menu page %0d: %0d of 32 bytes wrong", n, j);
+  end
+  rreg(7'h39, v8); check(v8 == 8'd0, "menu page register");
+  // a later MENU packet at offset 32 rewrites page 1 only
+  hdr(8'h06, 8'h00, 16'd32); pkt[4] = 8'h4D; pkt[5] = 8'h41; spi_send(6);
+  wreg(7'h39, 8'd1); repeat (24) @(posedge clk);
+  rreg(7'h40, v8); check(v8 == 8'h4D, "menu rewrite byte 0");
+  rreg(7'h41, v8); check(v8 == 8'h41, "menu rewrite byte 1");
+  rreg(7'h42, v8); check(v8 == 8'h40 + 8'd34, "menu rest of page kept");
+
   // ---- counters ----
   wreg(7'h11, 8'h02);
-  r32(7'h24, v32); check(v32 == 19, "packets"); $display("  packets %0d", v32);
+  r32(7'h24, v32); check(v32 == 21, "packets"); $display("  packets %0d", v32);
   rreg(7'h2C, v8); check(v8 == 5, "flips");
   rreg(7'h2E, v8); check(v8 == 1, "ignored packets");
   rreg(7'h2F, v8); check(v8 == 0, "no overruns or underruns");

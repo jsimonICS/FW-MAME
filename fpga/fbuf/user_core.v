@@ -32,6 +32,12 @@
 //                 FIFO (FPGA -> MAIN, 4096 bytes), where the FW2 display app
 //                 reads them (h\f\x) and plays them. Bytes that find the FIFO
 //                 full are dropped and counted.
+//   0x06 MENU     param = even byte address in the 2 KB menu memory; data =
+//                 bytes. The CM0 publishes its game list here and the FW2
+//                 display app reads it through registers 0x39 / 0x40-0x5F.
+//                 Layout (the CM0's and the app's): 64 pages of 32 bytes;
+//                 page 0 = {count, serial, running game, 0...}, page n =
+//                 game n's name (NUL-terminated).
 //   others        ignored to the end of the packet
 //
 // ---- Back to the CM0 ----
@@ -70,6 +76,9 @@
 //   0x3A-0x3D r   audio bytes pushed into the stream FIFO
 //   0x3E-0x3F r   audio bytes dropped (FIFO full, or a word arriving before
 //                 the previous one was pushed)
+//   0x39      rw  menu page: writing p copies menu bytes p*32 .. p*32+31 into
+//                 0x40-0x5F (done ~20 clocks later)
+//   0x40-0x5F r   menu window (the page selected by 0x39)
 
 `include "fw2_profile.vh"
 
@@ -96,7 +105,7 @@ module user_core (
   output wire [1:0] cm0_out
 );
 
-localparam [7:0] REVISION = 8'd3;
+localparam [7:0] REVISION = 8'd4;
 
 // ======================================================= video timing (FW-TPG)
 localparam [10:0] H_TOTAL   = 11'd1589;
@@ -253,7 +262,11 @@ always @(posedge clk) begin
 end
 
 // ======================================================= packet parser
-localparam [7:0] C_PIXELS = 8'h01, C_PALETTE = 8'h02, C_FLIP = 8'h03, C_SETREG = 8'h04, C_AUDIO = 8'h05;
+localparam [7:0] C_PIXELS = 8'h01, C_PALETTE = 8'h02, C_FLIP = 8'h03, C_SETREG = 8'h04, C_AUDIO = 8'h05,
+                 C_MENU = 8'h06;
+reg        menu_we = 1'b0;            // a menu word to write
+reg [9:0]  menu_wa;
+reg [15:0] menu_wd;
 reg        au_v = 1'b0;               // an audio word for the stream FIFO pusher
 reg [15:0] au_w;
 reg [1:0]  pst = 2'd0;               // 0 idle, 1 parameter next, 2 data
@@ -277,6 +290,7 @@ always @(posedge clk) begin
   pal_we   <= 1'b0;
   flip_spi <= 1'b0;
   au_v     <= 1'b0;
+  menu_we  <= 1'b0;
   if (wr_done) wr_pend <= 1'b0;
   if (!rst_n || clr) begin
     n_packets <= 32'd0; n_words <= 32'd0; n_ignored <= 8'd0; n_overrun <= 4'd0;
@@ -291,7 +305,8 @@ always @(posedge clk) begin
       pst  <= 2'd1;
       if (!clr) n_packets <= n_packets + 32'd1;
       if (!clr && w_data[7:0] != C_PIXELS && w_data[7:0] != C_PALETTE && w_data[7:0] != C_FLIP
-          && w_data[7:0] != C_SETREG && w_data[7:0] != C_AUDIO && n_ignored != 8'hFF)
+          && w_data[7:0] != C_SETREG && w_data[7:0] != C_AUDIO && w_data[7:0] != C_MENU
+          && n_ignored != 8'hFF)
         n_ignored <= n_ignored + 8'd1;
     end else if (pst == 2'd1) begin
       pst     <= 2'd2;
@@ -321,10 +336,45 @@ always @(posedge clk) begin
           au_v <= 1'b1;
           au_w <= w_data;
         end
+        C_MENU: begin
+          menu_we <= 1'b1;
+          menu_wa <= p_waddr[9:0];
+          menu_wd <= w_data;
+          p_waddr <= p_waddr + 15'd1;
+        end
         default: ;
       endcase
     end
   end
+end
+
+// ======================================================= menu memory (game list)
+// 1024 x 16 block RAM written by MENU packets. Writing a page number to 0x39
+// copies that page's 16 words into a 32-byte register window (0x40-0x5F), so
+// MAIN reads plain registers, never the block RAM's one-clock latency.
+reg [15:0] menu_mem [0:1023];
+always @(posedge clk) if (menu_we) menu_mem[menu_wa] <= menu_wd;
+
+reg [5:0]   menu_page = 6'd0;
+reg [4:0]   mc_cnt = 5'd0;            // words still to copy (16..1), 0 = idle
+reg [3:0]   mc_idx;                   // word being read
+reg         mc_v = 1'b0;              // menu_q holds word mc_last
+reg [3:0]   mc_last;
+reg [15:0]  menu_q;
+reg [255:0] menu_win = 256'd0;
+always @(posedge clk) begin
+  menu_q  <= menu_mem[{menu_page, mc_idx}];
+  mc_last <= mc_idx;
+  mc_v    <= mc_cnt != 5'd0;
+  if (reg_wr && reg_addr == 7'h39) begin
+    menu_page <= reg_wdata[5:0];
+    mc_idx    <= 4'd0;
+    mc_cnt    <= 5'd16;
+  end else if (mc_cnt != 5'd0) begin
+    mc_idx <= mc_idx + 4'd1;
+    mc_cnt <= mc_cnt - 5'd1;
+  end
+  if (mc_v) menu_win[mc_last * 16 +: 16] <= menu_q;
 end
 
 // ======================================================= audio -> stream FIFO
@@ -627,7 +677,10 @@ always @* begin
     7'h3A: rd = s_au_bytes[7:0];   7'h3B: rd = s_au_bytes[15:8];
     7'h3C: rd = s_au_bytes[23:16]; 7'h3D: rd = s_au_bytes[31:24];
     7'h3E: rd = s_au_drops[7:0];   7'h3F: rd = s_au_drops[15:8];
-    default: rd = 8'd0;
+    7'h39: rd = {2'd0, menu_page};
+    default:
+      if (reg_addr[6:5] == 2'b10) rd = menu_win[reg_addr[4:0] * 8 +: 8];   // 0x40-0x5F
+      else rd = 8'd0;
   endcase
 end
 assign reg_rdata = rd;

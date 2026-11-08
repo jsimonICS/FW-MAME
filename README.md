@@ -263,13 +263,16 @@ scp -i ~/.ssh/fw2_cm0 cm0/fastlink.c pi@10.12.194.1:/tmp/
 1. **CM0 on first.** MAIN's `l\a` toggles the CM0's power, so check the
    state in MAIN's Linux menu (`l`) before you use it.
 2. **Start the display app:** `python <wilibsp>/tools/fw.py run-app
-   FW-MAME/fwmame.uf2 --port COM14`. It loads `fbuf` and handles the buttons
+   Games/fwmame.uf2 --port COM14`. It loads `fbuf` and handles the buttons
    and audio.
-3. **On the CM0:** `~/fwmame/run.sh <game>`, with your ROM zips in
-   `~/fwmame/roms/`.
+3. **On the CM0:** `~/fwmame/run.sh`, with your ROM zips in
+   `~/fwmame/roms/`. With no game named, it starts the game menu.
+4. **On the FW2:** pick a game with the d-pad and press OK (✓). **HOME** goes
+   back to the menu. In a game, ✓ is button 1 and ✗ (CANCEL) is button 2.
 
 The game's picture goes to the CRT and its sound to the FW2's speaker, with
-the volume on the FW2's touch screen. Setting up the CM0 side (core, ROMs,
+the volume on the FW2's touch screen. `~/fwmame/run.sh <game>` still runs one
+game directly. Setting up the CM0 side (core, ROMs,
 building the frontend) is in [cm0/fe](cm0/fe). Use ROM sets that match MAME
 2003-Plus (MAME 0.78 era), not newer MAME sets.
 

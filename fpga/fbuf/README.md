@@ -29,6 +29,12 @@ The packet format, timing and register map are in the header of
   partial updates, unknown and odd-length packets, the test ramp, hsync
   width, the status bytes and the counters.
 
+**v004 adds the game-menu memory.** A MENU packet (0x06) writes a 2 KB block
+RAM: 64 pages of 32 bytes, holding the game list the CM0 publishes. MAIN reads
+a page by writing its number to 0x39 and reading the 32-byte register window
+at 0x40-0x5F. The window is copied from the block RAM, so reads never see its
+latency. 64% of the logic, 13 block RAMs, timing met at 29.3 MHz.
+
 **v003 adds audio.** A new SPI packet, AUDIO (0x05), carries samples. The
 design pushes their bytes into the shell's 4 KB stream FIFO (the `STREAM`
 capability), where the FW2 display app reads them through MAIN and plays them.

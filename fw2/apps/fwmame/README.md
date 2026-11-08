@@ -23,13 +23,24 @@ The FW-MAME console app for the FreeWili 2's display CPU. It:
 - reads a USB joystick or pad on the FW2's USB host ports (work in progress,
   see below).
 
-The screen lights each button while it's held. It shows the write count,
-failures and write time through MAIN, and on the second line the audio rate,
-underruns (U), dropped (D) and repeated (P) samples, resyncs (R) and the worst
-read time. The labels over the five colored buttons show FW-MAME's default
-mapping (COIN, START, B1, B2, B3), which lives on the CM0. Every button goes to
-the game. Holding HOME for 5 s still leaves the app, and holding PAGE for 5 s
-shows About.
+- shows the **game menu** (v004, `fbuf` v004). The CM0's supervisor (`run.sh`
+  with no game) publishes its ROM list in the FPGA's menu memory. The app reads
+  it (`h\f\w 39 <page>`, then `h\f\r 40 32`) and lists the games:
+  - **In the menu:** nav up/down moves (left/right jumps 5 games), and **OK**
+    (✓) plays the selected game. Its number goes in input byte 6, and the CM0
+    starts it.
+  - **In a game:** **HOME** stops it and returns to the menu. Holding HOME for
+    5 s still leaves the app. **OK** (✓) also presses **B1**, and **CANCEL**
+    (✗) also presses **B2**.
+  - A game the CM0 can't start (a ROM set that doesn't match) shows as
+    "<GAME> FAILED", and the menu stays.
+
+The screen has five status lines (FPGA, audio, input writes, USB, raw/learn),
+the game list, VOL-/VOL+ (and LEARN STICK when a HID stick is plugged in),
+and the five colored buttons, lit while held. Audio line: rate, underruns (U),
+dropped (D) and repeated (P) samples, resyncs (R), worst read time. The
+labels over the colored buttons show FW-MAME's default mapping (COIN, START,
+B1, B2, B3), which lives on the CM0. Holding PAGE for 5 s shows About.
 
 **Start the CM0 before the app.** While the app runs, MAIN's CM0 power-on
 (`l\a`) doesn't stick, but a CM0 that is already running stays on. To be
@@ -75,8 +86,8 @@ cmake -S fw2 -B build-fw2 -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
   -DPICO_TOOLCHAIN_PATH="<Arm GNU Toolchain 14.2 rel1>" \
   -Dpicotool_DIR=~/.pico-sdk/picotool-prebuilt/picotool
 cmake --build build-fw2 --target fwmame
-python <wilibsp>/tools/fw.py install-app build-fw2/apps/fwmame/fwmame.uf2 --folder FW-MAME --port COM14
-python <wilibsp>/tools/fw.py run-app FW-MAME/fwmame.uf2 --port COM14
+python <wilibsp>/tools/fw.py install-app build-fw2/apps/fwmame/fwmame.uf2 --folder Games --port COM14
+python <wilibsp>/tools/fw.py run-app Games/fwmame.uf2 --port COM14
 ```
 
 Use the prebuilt picotool. On this PC, a picotool built from source with

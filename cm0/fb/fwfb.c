@@ -184,6 +184,23 @@ int fwfb_audio(fwfb *fb, const int16_t *s, size_t n) {
     return 0;
 }
 
+int fwfb_menu(fwfb *fb, unsigned offset, const uint8_t *data, size_t n) {
+    if (offset & 1u) return -1;
+    size_t max = (fb->max_pkt - 4) & ~(size_t)1;
+    while (n) {
+        const size_t k = n < max ? n : max;
+        size_t len = k;
+        header(fb, 0x06, 0, offset);
+        memcpy(fb->tx + 4, data, k);
+        if (len & 1u) fb->tx[4 + len++] = 0;        // whole words only: pad an odd tail
+        if (send_packet(fb, 4 + len)) return -1;
+        offset += (unsigned)len;
+        data += k;
+        n -= k;
+    }
+    return 0;
+}
+
 // Feed received bytes to the packet parser; returns the number of whole packets.
 static int parse(fwfb *fb, const uint8_t *b, ssize_t n) {
   int done = 0;
