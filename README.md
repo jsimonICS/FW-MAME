@@ -8,8 +8,8 @@ The plan:
   plus composite sync on the 20-pin header. It's the same signal, pins and
   resistor ladder board as [FW-TPG](https://github.com/jsimonICS/FW-TPG).
 
-Status: **milestones 1-3 and phase 1 of milestone 4 are done on hardware**
-(2026-11-07):
+Status (2026-11-08): **MAME 2003-Plus plays on the CRT at 60 fps with the
+FW2's buttons, and its sound plays on the FW2's speaker.**
 - **Link test:** the CM0 pin map is known.
 - **Fast link:** SPI carries 8.24 MB/s error-free at 66.7 MHz.
 - **Framebuffer:** the CM0 draws double-buffered 256×224 frames on the CRT at
@@ -17,22 +17,30 @@ Status: **milestones 1-3 and phase 1 of milestone 4 are done on hardware**
 - **Inputs, FW2 buttons:** all 14 buttons reach the CM0 in under one field.
   The FW2 display app ([fw2/apps/fwmame](fw2/apps/fwmame)) also loads the
   FPGA design itself.
+- **Inputs, USB stick:** in progress. A low-speed HID controller enumerates
+  through the FW2's USB hub; the button learn mode isn't finished.
+- **MAME:** a libretro frontend ([cm0/fe](cm0/fe)) runs Mappy, 1942 and
+  Carnival at 60 fps. Audio goes through the FPGA and MAIN to the display app,
+  16 kHz mono, with on-screen volume buttons.
 
 Full results: [docs/linktest-results.md](docs/linktest-results.md),
 [docs/fastlink-results.md](docs/fastlink-results.md),
 [docs/fbuf-results.md](docs/fbuf-results.md),
-[docs/input-results.md](docs/input-results.md).
+[docs/input-results.md](docs/input-results.md),
+[docs/mame-results.md](docs/mame-results.md).
 
 ## How it fits together
 
 ```text
-              frames: SPI0 (+ UART)                  RGB333 + CSYNC
+              frames + audio: SPI0                   RGB333 + CSYNC
  CM0 (Linux, MAME) ─────────────────► FPGA (iCE40UP5K) ─────────────► header ► ladder ► CRT
        ▲                                   ▲    │
-       │ inputs: UART back from the FPGA   │    │
-       └───────────────────────────────────┘    │ register writes
+       │ vsync + inputs: UART              │    │ audio: stream FIFO
+       └───────────────────────────────────┘    │ inputs: register writes
                                                 ▼
- FW2 buttons / analog input ─► display app ─► MAIN
+ FW2 buttons, USB stick ─► display app ◄────► MAIN
+                               │
+                               └─► codec ─► FW2 speaker
 ```
 
 **FPGA:**
@@ -46,8 +54,13 @@ which is replaced while this design runs (see below). So inputs take a
 different route. The display app reads the FW2's buttons and writes them to
 FPGA registers through MAIN, one `h\f\w` per change, taking 1-2 ms. The FPGA
 sends them to the CM0 every field, in the same UART packet that carries the
-vsync status. In phase 2 a USB controller on the FW2's own USB host port,
-driven by the display CPU, takes the same route.
+vsync status. A USB controller on the FW2's own USB host ports, read by the
+display CPU through the on-board hub, takes the same route (in progress).
+
+**Audio:** the CM0 sends MAME's sound, resampled to 16 kHz mono, as SPI
+packets. The FPGA queues them in the shell's 4 KB stream FIFO. The display
+app reads them through MAIN about every 4 ms and plays them on the FW2's codec
+and speaker, about 75 ms behind the picture.
 
 ## What we know so far
 
@@ -144,16 +157,25 @@ optional. The plan is 40-50 MHz for margin.
    buffer, 256-color palette and FW-TPG's 15 kHz RGB333 timing, plus a CM0
    library and test tool. *Done: 60.05 fps with whole frames, see
    [docs/fbuf-results.md](docs/fbuf-results.md).*
-4. **Inputs** ([fw2/apps/fwmame](fw2/apps/fwmame), `fbuf` v002, `fwfb_inputs()`):
+4. **Inputs** ([fw2/apps/fwmame](fw2/apps/fwmame), `fbuf` v002+, `fwfb_inputs()`):
    - *Phase 1, FW2 buttons: done, see
      [docs/input-results.md](docs/input-results.md).* The 14 buttons go from
      the display app through MAIN and the FPGA to the CM0. No CM0 daemon is
      needed: the MAME frontend reads them from `fwfb`.
-   - Phase 2, USB joystick: a HID gamepad or XInput controller on the FW2's
-     USB host port, read by the display CPU (wilibsp's PIO-USB host, not yet
-     verified on hardware), sent in input bytes 2-5.
-5. **MAME:** MAME 2003-Plus with its video output sent over the link. Add
-   changed-line and palette compression if the bandwidth needs it.
+   - Phase 2, USB joystick: *in progress, paused.* A HID gamepad, arcade
+     encoder or XInput controller on the FW2's USB host ports goes in input
+     bytes 2-5. The ports turned out to be behind an on-board hub on the
+     display CPU's native USB, not PIO-USB, so the app has its own host code,
+     with low-speed support. A HID controller enumerates and reports; the
+     learn mode for mapping its buttons isn't finished
+     ([fw2/apps/fwmame](fw2/apps/fwmame#usb-controller-work-in-progress)).
+5. **MAME** ([cm0/fe](cm0/fe)): MAME 2003-Plus through a minimal libretro
+   frontend. *Running:* Mappy, 1942 and Carnival at 60 fps with whole frames,
+   so no compression is needed. Sound plays on the FW2 speaker through
+   `fbuf` v003 and the display app. See
+   [docs/mame-results.md](docs/mame-results.md). Still to do: a better
+   vertical-game display, analog controls, player 2, saving the volume
+   level, and the display app holding the CM0's power.
 
 ## Repository layout
 
@@ -171,6 +193,9 @@ optional. The plan is 40-50 MHz for margin.
 | [host/img2fb.py](host/img2fb.py) | Converts an image to framebuffer pixels + RGB333 palette |
 | [fw2/apps/fwmame](fw2/apps/fwmame) | FW2 display app: loads `fbuf`, sends the buttons (built against wilibsp) |
 | [tools/gen_fwfpga_header.py](tools/gen_fwfpga_header.py) | Builds an FPGA design and embeds it in a display app |
+| [cm0/fe](cm0/fe) | MAME 2003-Plus libretro frontend, `run.sh` game launcher |
+| [fw2/apps/fwmame/usbhost](fw2/apps/fwmame/usbhost) | USB host for controllers on the FW2's hub (native USB, low speed) |
+| `roms/` | Your game ROMs (git-ignored, never committed) |
 | [host/cm0sh.py](host/cm0sh.py), [host/cm0put.py](host/cm0put.py) | Shell commands and file copies to the CM0 through MAIN (fallback) |
 | [cm0/usbnet](cm0/usbnet), [cm0/usbnet_test.sh](cm0/usbnet_test.sh) | CM0 USB port as network + COM port (permanent install, live test) |
 | [docs](docs) | Results |
@@ -232,6 +257,21 @@ no known password, but the COM port shell is already logged in):
 ssh -i ~/.ssh/fw2_cm0 pi@10.12.194.1
 scp -i ~/.ssh/fw2_cm0 cm0/fastlink.c pi@10.12.194.1:/tmp/
 ```
+
+## Running MAME
+
+1. **CM0 on first.** MAIN's `l\a` toggles the CM0's power, so check the
+   state in MAIN's Linux menu (`l`) before you use it.
+2. **Start the display app:** `python <wilibsp>/tools/fw.py run-app
+   FW-MAME/fwmame.uf2 --port COM14`. It loads `fbuf` and handles the buttons
+   and audio.
+3. **On the CM0:** `~/fwmame/run.sh <game>`, with your ROM zips in
+   `~/fwmame/roms/`.
+
+The game's picture goes to the CRT and its sound to the FW2's speaker, with
+the volume on the FW2's touch screen. Setting up the CM0 side (core, ROMs,
+building the frontend) is in [cm0/fe](cm0/fe). Use ROM sets that match MAME
+2003-Plus (MAME 0.78 era), not newer MAME sets.
 
 ## Running the framebuffer
 

@@ -27,6 +27,11 @@
 //                 nothing (the back buffer is still the finished frame).
 //   0x04 SETREG   argument = register (0 WIDTH, 1 HEIGHT, 2 XSTART,
 //                 3 YSTART, 4 CPP, 5 CONTROL), param = value
+//   0x05 AUDIO    param ignored; data = 16-bit signed mono samples (16 kHz,
+//                 little-endian), pushed byte by byte into the shell's stream
+//                 FIFO (FPGA -> MAIN, 4096 bytes), where the FW2 display app
+//                 reads them (h\f\x) and plays them. Bytes that find the FIFO
+//                 full are dropped and counted.
 //   others        ignored to the end of the packet
 //
 // ---- Back to the CM0 ----
@@ -61,6 +66,10 @@
 //   0x2F      r   errors: bits 3:0 write overruns, bits 7:4 fetch underruns (saturating)
 //   0x30-0x37 rw  input state (staged; a write to 0x37 commits). Reads the committed value.
 //   0x38      r   input updates (commits, live, wraps)
+//   snapshot (command bit 1):
+//   0x3A-0x3D r   audio bytes pushed into the stream FIFO
+//   0x3E-0x3F r   audio bytes dropped (FIFO full, or a word arriving before
+//                 the previous one was pushed)
 
 `include "fw2_profile.vh"
 
@@ -87,7 +96,7 @@ module user_core (
   output wire [1:0] cm0_out
 );
 
-localparam [7:0] REVISION = 8'd2;
+localparam [7:0] REVISION = 8'd3;
 
 // ======================================================= video timing (FW-TPG)
 localparam [10:0] H_TOTAL   = 11'd1589;
@@ -244,7 +253,9 @@ always @(posedge clk) begin
 end
 
 // ======================================================= packet parser
-localparam [7:0] C_PIXELS = 8'h01, C_PALETTE = 8'h02, C_FLIP = 8'h03, C_SETREG = 8'h04;
+localparam [7:0] C_PIXELS = 8'h01, C_PALETTE = 8'h02, C_FLIP = 8'h03, C_SETREG = 8'h04, C_AUDIO = 8'h05;
+reg        au_v = 1'b0;               // an audio word for the stream FIFO pusher
+reg [15:0] au_w;
 reg [1:0]  pst = 2'd0;               // 0 idle, 1 parameter next, 2 data
 reg [7:0]  pcmd, parg;
 reg [14:0] p_waddr;                  // next word address in the back buffer
@@ -265,6 +276,7 @@ always @(posedge clk) begin
   sr_v     <= 1'b0;
   pal_we   <= 1'b0;
   flip_spi <= 1'b0;
+  au_v     <= 1'b0;
   if (wr_done) wr_pend <= 1'b0;
   if (!rst_n || clr) begin
     n_packets <= 32'd0; n_words <= 32'd0; n_ignored <= 8'd0; n_overrun <= 4'd0;
@@ -279,7 +291,7 @@ always @(posedge clk) begin
       pst  <= 2'd1;
       if (!clr) n_packets <= n_packets + 32'd1;
       if (!clr && w_data[7:0] != C_PIXELS && w_data[7:0] != C_PALETTE && w_data[7:0] != C_FLIP
-          && w_data[7:0] != C_SETREG && n_ignored != 8'hFF)
+          && w_data[7:0] != C_SETREG && w_data[7:0] != C_AUDIO && n_ignored != 8'hFF)
         n_ignored <= n_ignored + 8'd1;
     end else if (pst == 2'd1) begin
       pst     <= 2'd2;
@@ -305,11 +317,44 @@ always @(posedge clk) begin
           pal_wd <= w_data[8:0];
           p_pidx <= p_pidx + 8'd1;
         end
+        C_AUDIO: begin
+          au_v <= 1'b1;
+          au_w <= w_data;
+        end
         default: ;
       endcase
     end
   end
 end
+
+// ======================================================= audio -> stream FIFO
+// Words arrive at most every 6 clocks (SPI at 66.7 MHz); each is pushed as two
+// bytes, low first, one per clock while the FIFO is ready. A byte that finds
+// the FIFO full is dropped (the shell also flags RX_OVERRUN).
+reg [1:0]  au_left = 2'd0;            // bytes of au_q still to push
+reg [15:0] au_q;
+reg [31:0] au_bytes;
+reg [15:0] au_drops;
+wire       au_push = au_left != 2'd0;
+always @(posedge clk) begin
+  if (!rst_n || clr) begin
+    au_bytes <= 32'd0; au_drops <= 16'd0;
+  end else begin
+    if (au_push && fifo_rx_ready) au_bytes <= au_bytes + 32'd1;
+    if (au_push && !fifo_rx_ready && au_drops != 16'hFFFF) au_drops <= au_drops + 16'd1;
+  end
+  if (!rst_n) begin
+    au_left <= 2'd0;
+  end else if (au_v) begin                       // a new word replaces anything left
+    au_q    <= au_w;
+    au_left <= 2'd2;
+  end else if (au_push) begin
+    au_q    <= {8'd0, au_q[15:8]};
+    au_left <= au_left - 2'd1;
+  end
+end
+assign fifo_rx_data  = au_q[7:0];
+assign fifo_rx_valid = au_push;
 
 // ======================================================= front / back, flips
 // A pending flip happens at the first clock of vertical blank (line 260 to
@@ -544,10 +589,13 @@ assign cm0_out = {1'b0, txd};        // CTS_n low, UART TX
 reg [31:0] s_packets, s_words;
 reg [15:0] s_flips;
 reg [7:0]  s_ignored, s_errs;
+reg [31:0] s_au_bytes;
+reg [15:0] s_au_drops;
 always @(posedge clk) begin
   if (snap) begin
     s_packets <= n_packets; s_words <= n_words; s_flips <= n_flips;
     s_ignored <= n_ignored; s_errs <= {n_underrun, n_overrun};
+    s_au_bytes <= au_bytes; s_au_drops <= au_drops;
   end
 end
 
@@ -576,6 +624,9 @@ always @* begin
     7'h34: rd = inputs[39:32]; 7'h35: rd = inputs[47:40];
     7'h36: rd = inputs[55:48]; 7'h37: rd = inputs[63:56];
     7'h38: rd = in_updates;
+    7'h3A: rd = s_au_bytes[7:0];   7'h3B: rd = s_au_bytes[15:8];
+    7'h3C: rd = s_au_bytes[23:16]; 7'h3D: rd = s_au_bytes[31:24];
+    7'h3E: rd = s_au_drops[7:0];   7'h3F: rd = s_au_drops[15:8];
     default: rd = 8'd0;
   endcase
 end
@@ -583,11 +634,9 @@ assign reg_rdata = rd;
 
 assign rp_out        = 10'd0;
 assign fifo_tx_ready = 1'b0;
-assign fifo_rx_data  = 8'd0;
-assign fifo_rx_valid = 1'b0;
 
 /* verilator lint_off UNUSEDSIGNAL */
-wire unused = reg_rd | (|hdr_in) | (|rp_in) | (|fifo_tx_data) | fifo_tx_valid | fifo_rx_ready
+wire unused = reg_rd | (|hdr_in) | (|rp_in) | (|fifo_tx_data) | fifo_tx_valid
             | any_row | cm0_in[2] | cm0_in[3];
 /* verilator lint_on UNUSEDSIGNAL */
 

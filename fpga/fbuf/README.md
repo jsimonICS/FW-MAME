@@ -29,6 +29,16 @@ The packet format, timing and register map are in the header of
   partial updates, unknown and odd-length packets, the test ramp, hsync
   width, the status bytes and the counters.
 
+**v003 adds audio.** A new SPI packet, AUDIO (0x05), carries samples. The
+design pushes their bytes into the shell's 4 KB stream FIFO (the `STREAM`
+capability), where the FW2 display app reads them through MAIN and plays them.
+Registers 0x3A-0x3F count bytes pushed and dropped. The samples are 14-bit,
+in self-marking byte pairs, so a byte dropped by a full FIFO costs one sample
+rather than the alignment ([cm0/fb/fwfb.h](../../cm0/fb/fwfb.h)). 51% of the
+logic, 9 block RAMs, timing met at 32.9 MHz. On hardware: 16,000 samples/s
+with no losses, and 1942's music and effects on the FW2 speaker
+([docs/mame-results.md](../../docs/mame-results.md)).
+
 **v002 (milestone 4) adds inputs.** MAIN writes 8 input bytes to registers
 0x30-0x37, committed together on the write to 0x37. The status message to
 the CM0 grows from 1 byte to an 11-byte packet: a status byte with bit 7 set,

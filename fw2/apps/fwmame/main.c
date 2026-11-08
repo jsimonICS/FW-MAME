@@ -14,6 +14,17 @@
  * Every 2 s it checks the design is still loaded (MAIN reboot, zone 6 drop)
  * and reloads it if not.
  *
+ * USB controller (input bytes 2-5): a joystick or pad on one of the FW2's USB
+ * host ports. Those sit behind the on-board CH334F hub on this CPU's native
+ * USB controller (zone 8, ioexp_usb_pwr); usbhost/hh_usb.c drives it, low and
+ * full speed. (wilibsp's PIO-USB host is on GPIO42/43, which the FW2 wires as
+ * a USB device port, not to these ports.) Xbox 360-style XInput pads map
+ * directly. Any other HID joystick or arcade encoder
+ * needs a map from its raw report to the 12 pad controls, learnt once on the
+ * FW2 (prompts on screen, GREY skips a control the stick doesn't have) and
+ * saved per VID:PID as /appdata/fwmame/pad_VVVVPPPP.map. Learning starts by
+ * itself for a stick without a map; the LEARN touch button redoes it.
+ *
  * All buttons go to the game, including HOME and PAGE; holding HOME for 5 s
  * still leaves the app and holding PAGE for 5 s shows About (FW2App
  * contract). The labels over the five coloured buttons show FW-MAME's
@@ -21,10 +32,13 @@
 #include "fw2.h"
 #include "platform/diag.h"
 #include "pico/stdlib.h"
+#include "hardware/dma.h"
 #include "onewili.h"
 #include "onewili_fwgui.h"
 #include "onewili_sd.h"
 #include "input/app_recovery_onewili.h"
+#include "input/ft6336.h"
+#include "usbhost/hh_usb.h"
 #include "fbuf_fwfpga.h"
 #include <stdarg.h>
 #include <stdio.h>
@@ -53,8 +67,8 @@ static inline uint16_t be16(uint16_t c) { return (uint16_t)((c >> 8) | (c << 8))
 #define C_DARK  be16(0x2104)
 #define C_CYAN  be16(0x07FF)
 
-enum { ROW_STATE, ROW_LINK, ROW_STATS, ROW_COUNT };
-#define ROW_Y(r) (40 + (r) * 22)
+enum { ROW_STATE, ROW_LINK, ROW_STATS, ROW_USB, ROW_RAW, ROW_COUNT };
+#define ROW_Y(r) (30 + (r) * 20)
 
 static void line(int row, uint16_t fg, const char *fmt, ...) {
     char s[30];
@@ -70,16 +84,21 @@ static void line(int row, uint16_t fg, const char *fmt, ...) {
 typedef struct { int x, y, w, h; const char *label; } key_box;
 static const key_box keys[UARTKBD_BTN_COUNT] = {
     [UARTKBD_BTN_GREY]       = {0},   /* the coloured five use the bottom bar */
-    [UARTKBD_BTN_NAV_UP]     = {70, 112, 40, 34, "U"},
-    [UARTKBD_BTN_NAV_DOWN]   = {70, 192, 40, 34, "D"},
-    [UARTKBD_BTN_NAV_LEFT]   = {26, 152, 40, 34, "L"},
-    [UARTKBD_BTN_NAV_RIGHT]  = {114, 152, 40, 34, "R"},
-    [UARTKBD_BTN_NAV_CENTER] = {70, 152, 40, 34, "C"},
-    [UARTKBD_BTN_HOME]       = {200, 130, 120, 30, "HOME"},
-    [UARTKBD_BTN_OK]         = {330, 130, 120, 30, "OK"},
-    [UARTKBD_BTN_CANCEL]     = {200, 170, 120, 30, "CANCEL"},
-    [UARTKBD_BTN_PAGE]       = {330, 170, 120, 30, "PAGE"},
+    [UARTKBD_BTN_NAV_UP]     = {70, 134, 40, 34, "U"},
+    [UARTKBD_BTN_NAV_DOWN]   = {70, 214, 40, 34, "D"},
+    [UARTKBD_BTN_NAV_LEFT]   = {26, 174, 40, 34, "L"},
+    [UARTKBD_BTN_NAV_RIGHT]  = {114, 174, 40, 34, "R"},
+    [UARTKBD_BTN_NAV_CENTER] = {70, 174, 40, 34, "C"},
+    [UARTKBD_BTN_HOME]       = {200, 136, 120, 30, "HOME"},
+    [UARTKBD_BTN_OK]         = {330, 136, 120, 30, "OK"},
+    [UARTKBD_BTN_CANCEL]     = {200, 174, 120, 30, "CANCEL"},
+    [UARTKBD_BTN_PAGE]       = {330, 174, 120, 30, "PAGE"},
 };
+/* Touch target: learn the USB stick's controls again. */
+#define LEARN_X 200
+#define LEARN_Y 214
+#define LEARN_W 250
+#define LEARN_H 34
 
 /* The five coloured buttons: boxes directly above them (wilibsp AGENTS.md),
  * in wire-order colours, labelled with FW-MAME's default mapping. Held =
@@ -189,12 +208,284 @@ static bool load_design(void) {
            version == FWFPGA_VERSION && cdone == 1;
 }
 
+/* ======================================================= USB controller */
+/* Pad controls in FWFB_PAD_* order (cm0/fb/fwfb.h), named as on the screen. */
+#define PAD_COUNT 12
+static const char *const pad_name[PAD_COUNT] = {"UP", "DOWN", "LEFT", "RIGHT", "B1", "B2",
+                                                "B3", "B4", "B5", "B6", "COIN", "START"};
+
+/* How one control shows in a raw HID report. */
+enum { OP_NONE, OP_BIT, OP_BIT0, OP_LT, OP_GT, OP_EQ, OP_HAT };
+typedef struct { uint8_t byte, op, mask, value; } pad_rule;
+#define MAP_MAGIC 0x31504D46u   /* "FMP1" */
+typedef struct {
+    uint32_t magic;
+    uint16_t vid, pid;
+    uint16_t len, reserved;
+    pad_rule rule[PAD_COUNT];
+} pad_map;
+
+static uint8_t hid_rep[64], hid_rest[64];
+static uint16_t hid_len, hid_rest_len, hid_vid, hid_pid;
+static bool hid_new, hid_present;
+typedef struct { uint16_t buttons; int16_t lx, ly; } xinput_pad;   /* XINPUT_GAMEPAD_* bits */
+static xinput_pad xpad;
+static bool x_new, x_present;
+static pad_map map;
+static bool map_ok;
+static uint16_t pad_bits;
+static int8_t stick_x, stick_y;
+static int learn = -1;                /* control being learnt, -1 = not learning */
+static bool learn_wait;               /* learning starts at the stick's next report */
+static bool learn_release;            /* waiting for the stick to return to rest */
+static bool usb_ok;
+
+/* Newest report from the controller, if any (call every loop pass). */
+static void usb_read_reports(void) {
+    uint8_t b[64];
+    const hh_status_t *s = hh_usb_status();
+    const int n = hh_usb_report(b, sizeof b);
+    if (n <= 0) return;
+    if (s->kind == HH_KIND_HID) {
+        memcpy(hid_rep, b, (size_t)n);
+        hid_len = (uint16_t)n;
+        hid_new = true;
+        if (s->reports <= 20)
+            DIAG("fwmame: report %u len %d: %02x %02x %02x %02x %02x %02x %02x %02x\n", (unsigned)s->reports, n,
+                 b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]);
+    } else if (s->kind == HH_KIND_XINPUT && n >= 10 && b[0] == 0x00 && b[1] >= 0x14) {   /* input message */
+        xpad.buttons = (uint16_t)(b[2] | (b[3] << 8));
+        xpad.lx = (int16_t)(b[6] | (b[7] << 8));
+        xpad.ly = (int16_t)(b[8] | (b[9] << 8));
+        x_new = true;
+    }
+}
+
+static void map_path(char *p, size_t n) {
+    snprintf(p, n, "/appdata/fwmame/pad_%04X%04X.map", hid_vid, hid_pid);
+}
+
+static bool map_load(void) {
+    char path[48];
+    ow_sd_file f;
+    size_t got = 0;
+    map_path(path, sizeof path);
+    if (ow_sd_open(&dev, &f, path, OW_SD_READ) != OW_OK) return false;
+    const ow_status s = ow_sd_read(&f, &map, sizeof map, &got);
+    (void)ow_sd_close(&f);
+    return s == OW_OK && got == sizeof map && map.magic == MAP_MAGIC && map.vid == hid_vid && map.pid == hid_pid;
+}
+
+static bool map_save(void) {
+    char path[48];
+    map_path(path, sizeof path);
+    (void)ow_sd_mkdir(&dev, "/appdata");
+    (void)ow_sd_mkdir(&dev, "/appdata/fwmame");
+    return ow_sd_put_mem(&dev, path, (const uint8_t *)&map, sizeof map, false) == OW_OK;
+}
+
+static bool axis_like(uint8_t rest) { return rest >= 0x40 && rest <= 0xC0; }
+
+/* Hat value h (0 = up, clockwise, 8+ = centred) against a direction control. */
+static bool hat_hit(unsigned h, int control) {
+    if (h > 7) return false;
+    switch (control) {
+        case 0: return h == 7 || h <= 1;   /* up */
+        case 1: return h >= 3 && h <= 5;   /* down */
+        case 2: return h >= 5;             /* left */
+        case 3: return h >= 1 && h <= 3;   /* right */
+        default: return false;
+    }
+}
+
+static bool rule_hit(const pad_rule *r, int control, const uint8_t *rep, uint16_t len) {
+    if (r->op == OP_NONE || r->byte >= len) return false;
+    const uint8_t b = rep[r->byte];
+    switch (r->op) {
+        case OP_BIT:  return (b & r->mask) != 0;
+        case OP_BIT0: return (b & r->mask) == 0;
+        case OP_LT:   return b < r->value;
+        case OP_GT:   return b > r->value;
+        case OP_EQ:   return (b & r->mask) == r->value;
+        case OP_HAT:  return hat_hit(r->mask == 0xF0 ? (unsigned)(b >> 4) : (unsigned)(b & 0x0F), control);
+        default:      return false;
+    }
+}
+
+/* The report is back at rest (axes within 0x20 of centre, everything else exact). */
+static bool at_rest(const uint8_t *rep) {
+    for (uint16_t i = 0; i < hid_rest_len; i++) {
+        const int d = (int)rep[i] - (int)hid_rest[i];
+        if (axis_like(hid_rest[i]) ? (d > 0x20 || d < -0x20) : d != 0) return false;
+    }
+    return true;
+}
+
+/* What changed from rest, as a rule for `control`; false while nothing clear has. */
+static bool classify(const uint8_t *rep, int control, pad_rule *out) {
+    for (uint16_t i = 0; i < hid_rest_len; i++) {
+        const uint8_t r0 = hid_rest[i], v = rep[i], d = (uint8_t)(r0 ^ v);
+        const int delta = (int)v - (int)r0;
+        if (!d) continue;
+        if (axis_like(r0) && delta < 0x40 && delta > -0x40) continue;   /* axis noise */
+        out->byte = (uint8_t)i;
+        /* Directions: a hat first (centred 8+, 0-7 = direction). Up is 8 -> 0, a
+         * one-bit change, so this test must come before the one-bit one. */
+        if (control < 4 && !(d & 0xF0) && (r0 & 0x0F) >= 8 && (v & 0x0F) <= 7) {
+            out->op = OP_HAT; out->mask = 0x0F;                       /* hat in the low nibble */
+        } else if (control < 4 && !(d & 0x0F) && (r0 >> 4) >= 8 && (v >> 4) <= 7) {
+            out->op = OP_HAT; out->mask = 0xF0;
+        } else if ((d & (d - 1)) == 0) {                              /* one bit */
+            out->op = (v & d) ? OP_BIT : OP_BIT0;
+            out->mask = d;
+        } else if (axis_like(r0)) {
+            out->op = delta < 0 ? OP_LT : OP_GT;                      /* axis: threshold halfway */
+            out->value = (uint8_t)((r0 + v) / 2);
+        } else {
+            out->op = OP_EQ; out->mask = d; out->value = (uint8_t)(v & d);
+        }
+        return true;
+    }
+    return false;
+}
+
+static void show_learn(void) {
+    if (learn < 0) return;
+    line(ROW_RAW, C_CYAN, "PRESS %s  (GREY SKIPS)", pad_name[learn]);
+}
+
+static void learn_start(void) {
+    if (!hid_present) return;
+    /* The rest state: the stick's newest interrupt report. Without one, ask
+     * it (GET_REPORT), but only trust an answer of the report's size: some
+     * sticks answer GET_REPORT in another layout (050D:0803: 3 bytes for a
+     * 7-byte report). */
+    learn_wait = false;
+    if (hid_len) {
+        memcpy(hid_rest, hid_rep, hid_len);
+        hid_rest_len = hid_len;
+    } else {
+        const int n = hh_usb_get_report(hid_rest, sizeof hid_rest);
+        DIAG("fwmame: learn start, GET_REPORT %d bytes (endpoint %u)\n", n, hh_usb_status()->mps);
+        if (n <= 0 || n != hh_usb_status()->mps) {
+            learn_wait = true;                       /* start at the first interrupt report */
+            line(ROW_RAW, C_WHITE, "WAITING FOR THE STICK...");
+            return;
+        }
+        hid_rest_len = (uint16_t)n;
+        memcpy(hid_rep, hid_rest, (size_t)n);
+        hid_len = (uint16_t)n;
+    }
+    DIAG("fwmame: learn start, rest %u bytes: %02x %02x %02x %02x %02x %02x %02x\n", hid_rest_len, hid_rest[0],
+         hid_rest[1], hid_rest[2], hid_rest[3], hid_rest[4], hid_rest[5], hid_rest[6]);
+    memset(&map, 0, sizeof map);
+    map.magic = MAP_MAGIC;
+    map.vid = hid_vid;
+    map.pid = hid_pid;
+    map.len = hid_len;
+    map_ok = false;
+    learn = 0;
+    learn_release = false;
+    show_learn();
+}
+
+static void learn_next(void) {
+    learn_release = false;
+    if (++learn < PAD_COUNT) { show_learn(); return; }
+    learn = -1;
+    map_ok = true;
+    const bool saved = map_save();
+    line(ROW_RAW, saved ? C_GREEN : C_RED, saved ? "MAP SAVED" : "MAP SAVE FAILED");
+}
+
+static void learn_report(void) {
+    if (hid_len < hid_rest_len) hid_rest_len = hid_len;   /* compare only what both carry */
+    if (hid_len == 0) return;
+    if (learn_release) {
+        if (at_rest(hid_rep)) learn_next();
+        return;
+    }
+    pad_rule r = {0};
+    if (classify(hid_rep, learn, &r)) {
+        map.rule[learn] = r;
+        learn_release = true;
+        line(ROW_RAW, C_GREEN, "%s: BYTE %u OP %u %02X %02X", pad_name[learn], r.byte, r.op, r.mask, r.value);
+    }
+}
+
+static void show_usb(void) {
+    char raw[30] = "";
+    const hh_status_t *s = hh_usb_status();
+    if (!x_present && !hid_present) {                    /* diagnostics: hub ports, last device */
+        if (!usb_ok) {
+            line(ROW_USB, C_RED, "USB PORTS NOT POWERED");
+        } else if (s->state == HH_ST_ROOT_WAIT || s->state == HH_ST_FAILED) {
+            line(ROW_USB, C_RED, "USB HUB %s ERR %d", s->state == HH_ST_FAILED ? "FAILED" : "WAIT", s->last_error);
+        } else {
+            int k = snprintf(raw, sizeof raw, "HUB");
+            for (int p = 1; p <= s->n_ports && p <= 4; p++)
+                k += snprintf(raw + k, sizeof raw - (size_t)k, " %u:%04X", p, s->port_status[p]);
+            line(ROW_USB, C_GREY, "%s", raw);
+        }
+        if (s->port && s->kind == HH_KIND_OTHER)
+            line(ROW_RAW, C_RED, "%04X:%04X CL %02X/%02X/%02X ?", s->vid, s->pid, s->itf_class, s->itf_subclass,
+                 s->itf_protocol);
+        else if (s->port && s->last_error)
+            line(ROW_RAW, C_RED, "PORT %u %s ERR %d", s->port, s->low_speed ? "LS" : "FS", s->last_error);
+        else
+            line(ROW_RAW, C_BLACK, "");
+        return;
+    }
+    if (x_present) {
+        line(ROW_USB, C_GREY, "USB XINPUT PAD %03X", pad_bits);
+    } else if (learn >= 0) {                             /* learning: live report count and bytes */
+        int k = snprintf(raw, sizeof raw, "R%lu L%u/%u", (unsigned long)s->reports, hid_len, hid_rest_len);
+        for (uint16_t i = 0; i < hid_len && i < 5 && k < (int)sizeof raw - 3; i++)
+            k += snprintf(raw + k, sizeof raw - (size_t)k, " %02X", hid_rep[i]);
+        line(ROW_USB, C_WHITE, "%s", raw);
+    } else {
+        if (map_ok) line(ROW_USB, C_GREY, "%04X:%04X %s PAD %03X", hid_vid, hid_pid, s->low_speed ? "LS" : "FS", pad_bits);
+        else line(ROW_USB, C_RED, "%04X:%04X %s NO MAP", hid_vid, hid_pid, s->low_speed ? "LS" : "FS");
+        for (uint16_t i = 0; i < hid_len && i < 9; i++) snprintf(raw + 3 * i, sizeof raw - 3 * i, "%02X ", hid_rep[i]);
+        if (learn < 0) line(ROW_RAW, C_GREY, "%s", raw);
+    }
+}
+
+static void draw_learn_button(void) {
+    const bool on = hid_present && !x_present;
+    st7796_fill_rect(LEARN_X, LEARN_Y, LEARN_W, LEARN_H, on ? C_GREY : C_BLACK);
+    if (on) st7796_draw_text(LEARN_X + 10, LEARN_Y + 9, 2, C_BLACK, C_GREY, "LEARN STICK");
+}
+
+/* Pad bits and stick from whichever controller is present. */
+static void pad_update(void) {
+    uint16_t bits = 0;
+    int8_t sx = 0, sy = 0;
+    if (x_present) {
+        static const uint16_t xbit[PAD_COUNT] = {0x0001, 0x0002, 0x0004, 0x0008, 0x1000, 0x2000,
+                                                 0x4000, 0x8000, 0x0100, 0x0200, 0x0020, 0x0010};
+        for (int i = 0; i < PAD_COUNT; i++) if (xpad.buttons & xbit[i]) bits |= (uint16_t)(1u << i);
+        sx = (int8_t)(xpad.lx >> 8);
+        sy = (int8_t)(-(xpad.ly >> 8) < 127 ? -(xpad.ly >> 8) : 127);
+        if (xpad.ly > 16000) bits |= 1u << 0;
+        if (xpad.ly < -16000) bits |= 1u << 1;
+        if (xpad.lx < -16000) bits |= 1u << 2;
+        if (xpad.lx > 16000) bits |= 1u << 3;
+    } else if (hid_present && map_ok && learn < 0) {
+        for (int i = 0; i < PAD_COUNT; i++)
+            if (rule_hit(&map.rule[i], i, hid_rep, hid_len)) bits |= (uint16_t)(1u << i);
+    }
+    pad_bits = bits;
+    stick_x = sx;
+    stick_y = sy;
+}
+
 /* One h\f\w with all 8 input bytes (bare hex tokens); the write to 0x37 commits. */
 static bool write_inputs(void) {
     char cmd[64];
     counter++;
-    snprintf(cmd, sizeof cmd, "h\\f\\w %02X %02X %02X 00 00 00 00 00 %02X", REG_INPUTS, buttons & 0xFFu,
-             buttons >> 8, counter);
+    snprintf(cmd, sizeof cmd, "h\\f\\w %02X %02X %02X %02X %02X %02X %02X 00 %02X", REG_INPUTS, buttons & 0xFFu,
+             buttons >> 8, pad_bits & 0xFFu, pad_bits >> 8, (uint8_t)stick_x, (uint8_t)stick_y, counter);
     const uint64_t t0 = time_us_64();
     const bool ok = call("INPUTS", cmd, 500);
     last_ms = (uint32_t)((time_us_64() - t0) / 1000u);
@@ -202,6 +493,160 @@ static bool write_inputs(void) {
     if (ok) writes++;
     else write_fails++;
     return ok;
+}
+
+/* ======================================================= audio
+ * The CM0 sends 16-bit mono samples at 16 kHz in AUDIO packets; the FPGA
+ * (fbuf v003+) puts them in the shell's 4 KB stream FIFO. This pulls them
+ * through MAIN (h\f\r 64 = byte count, h\f\x n = up to 256 bytes as hex) and
+ * writes them into a ring that a looping DMA plays to the NAU88C10 at 16 kHz.
+ * The write position is kept ~75 ms ahead of the DMA: one sample in 32 is
+ * repeated when the ring runs low and dropped when it runs high, which takes
+ * up the rate difference between the emulator and this CPU's codec clock.
+ * Silence is kept ahead of the write position, so an underrun is quiet
+ * instead of replaying the ring. */
+#define AU_FRAMES  4096u               /* 256 ms; power of two, ring-aligned */
+#define AU_TARGET  1200u               /* 75 ms ahead of the DMA */
+#define AU_GUARD   256u                /* frames of silence kept ahead */
+/* Volume: 11 levels set by the VOL-/VOL+ touch buttons, gain = vol_gain[level]/16.
+ * The top is unity (full-scale samples, no boost), so the 0.5 W speaker never
+ * gets more than the codec setup allows. Level 6 = half, the old fixed level. */
+static const uint8_t vol_gain[11] = {0, 1, 2, 3, 4, 6, 8, 10, 12, 14, 16};
+static int vol_level = 6;
+#define VOL_Y   250
+#define VOL_H   26
+#define VOLM_X  200                    /* VOL- box */
+#define VOLP_X  370                    /* VOL+ box */
+#define VOL_W   80
+
+static void draw_volume(void) {
+    st7796_fill_rect(VOLM_X, VOL_Y, VOL_W, VOL_H, C_GREY);
+    st7796_draw_text(VOLM_X + 16, VOL_Y + 5, 2, C_BLACK, C_GREY, "VOL-");
+    st7796_fill_rect(VOLP_X, VOL_Y, VOL_W, VOL_H, C_GREY);
+    st7796_draw_text(VOLP_X + 16, VOL_Y + 5, 2, C_BLACK, C_GREY, "VOL+");
+    char s[8];
+    snprintf(s, sizeof s, "%2d", vol_level);
+    st7796_fill_rect(VOLM_X + VOL_W, VOL_Y, VOLP_X - VOLM_X - VOL_W, VOL_H, C_BLACK);
+    st7796_draw_text(VOLM_X + VOL_W + 26, VOL_Y + 5, 2, C_WHITE, C_BLACK, s);
+}
+static uint32_t au_ring[AU_FRAMES] __attribute__((aligned(AU_FRAMES * 4)));
+static int au_ch[2] = {-1, -1};        /* the two chained DMA channels reading the ring */
+static uint32_t au_wp;                 /* next frame index to write */
+static bool audio_ok, au_have_low;
+static uint8_t au_low;                 /* a sample's low byte left over from the last read */
+static uint32_t au_bytes, au_reads, au_under, au_drops, au_dups, au_last_ms, au_worst_ms, au_n, au_resync;
+static uint64_t au_next_us, au_rate_t0;
+static uint32_t au_rate_bytes, au_rate;   /* bytes/s over the last second */
+
+static uint32_t au_pos(void) {
+    for (int i = 0; i < 2; i++) {
+        if (au_ch[i] < 0 || !dma_channel_is_busy((uint)au_ch[i])) continue;
+        return (uint32_t)((dma_hw->ch[au_ch[i]].read_addr - (uintptr_t)au_ring) / 4u) & (AU_FRAMES - 1u);
+    }
+    return au_wp;
+}
+
+static void audio_init(void) {
+    const uint32_t bit = picpwr_zone_bit(PICPWR_ZONE_AUDIO);
+    picpwr_keep_awake(bit);
+    bool up = false;
+    for (uint32_t waited = 0; waited < 3000 && !up; waited += 25) {
+        uint32_t rails = 0;
+        up = picpwr_rails(&rails) && (rails & bit);
+        if (!up) { picpwr_task(); fw2_app_recovery_sleep_ms(25); }
+    }
+    if (!up) { DIAG("fwmame: audio zone not up\n"); return; }
+    codec_nau88c10_init();
+    codec_nau88c10_dac_mute(false);
+    audio_i2s_duplex_init(16000);
+    codec_nau88c10_set_output(CODEC_OUT_SPEAKER);
+    memset(au_ring, 0, sizeof au_ring);
+    audio_i2s_duplex_play_loop(au_ring, AU_FRAMES);
+    int k = 0;                                   /* find the DMA channels reading the ring */
+    for (uint ch = 0; ch < NUM_DMA_CHANNELS && k < 2; ch++) {
+        const uintptr_t ra = dma_hw->ch[ch].read_addr;
+        if (ra >= (uintptr_t)au_ring && ra <= (uintptr_t)(au_ring + AU_FRAMES)) au_ch[k++] = (int)ch;
+    }
+    au_wp = (au_pos() + AU_TARGET) & (AU_FRAMES - 1u);
+    audio_ok = k > 0;
+    DIAG("fwmame: audio %s, DMA channels %d %d\n", audio_ok ? "up" : "DMA not found", au_ch[0], au_ch[1]);
+}
+
+static void au_put(int16_t s) {
+    const int16_t v = (int16_t)((s * vol_gain[vol_level]) / 16);
+    au_ring[au_wp] = ((uint32_t)(uint16_t)v << 16) | (uint16_t)v;
+    au_wp = (au_wp + 1u) & (AU_FRAMES - 1u);
+}
+
+/* Each sample is 14 bits in two self-marking bytes (cm0/fb/fwfb.h): low byte
+ * bit 0 = 0, high byte bit 0 = 1. A byte lost in a full FIFO costs one sample;
+ * the next low byte re-locks the stream. */
+static void au_samples(const uint8_t *b, int n) {
+    for (int i = 0; i < n; i++) {
+        if (!(b[i] & 1u)) { au_low = b[i] >> 1; au_have_low = true; continue; }
+        if (!au_have_low) { au_resync++; continue; }            /* a high byte without its low byte */
+        au_have_low = false;
+        int v = au_low | ((b[i] >> 1) << 7);                     /* 14-bit two's complement */
+        if (v & 0x2000) v -= 0x4000;
+        const int16_t s = (int16_t)(v << 2);
+        const uint32_t level = (au_wp - au_pos()) & (AU_FRAMES - 1u);
+        au_n++;
+        if (level > AU_FRAMES - AU_GUARD) {            /* the DMA passed us: start over ahead of it */
+            au_under++;
+            au_wp = (au_pos() + AU_TARGET) & (AU_FRAMES - 1u);
+        } else if (level > 2 * AU_TARGET && (au_n & 31u) == 0) {
+            au_drops++;
+            continue;                                  /* too far ahead: drop this one */
+        } else if (level < AU_TARGET / 2 && (au_n & 31u) == 0) {
+            au_dups++;
+            au_put(s);                                 /* running low: play this one twice */
+        }
+        au_put(s);
+    }
+    for (uint32_t k = 0, w = au_wp; k < AU_GUARD; k++, w = (w + 1u) & (AU_FRAMES - 1u)) au_ring[w] = 0;
+}
+
+static int hex_bytes(const char *s, uint8_t *out, int max) {
+    int n = 0, nib = -1;
+    for (; *s && n < max; s++) {
+        int v = (*s >= '0' && *s <= '9') ? *s - '0' : (*s >= 'A' && *s <= 'F') ? *s - 'A' + 10
+              : (*s >= 'a' && *s <= 'f') ? *s - 'a' + 10 : -1;
+        if (v < 0) continue;
+        if (nib < 0) nib = v;
+        else { out[n++] = (uint8_t)(nib << 4 | v); nib = -1; }
+    }
+    return n;
+}
+
+static void audio_task(void) {
+    const uint64_t now = time_us_64();
+    if (!audio_ok || !running || now < au_next_us) return;
+    au_next_us = now + 4000u;
+    static bool flushed;
+    if (!flushed) flushed = call("AUFLUSH", "h\\f\\w 63 01", 300);   /* start clean: drop what piled up */
+    uint8_t b[260];
+    if (!call("AUCNT", "h\\f\\r 64 2", 200) || hex_bytes(reply, b, 2) != 2) return;
+    unsigned avail = b[0] | (unsigned)b[1] << 8;
+    for (int chunk = 0; chunk < 4 && avail > 0; chunk++) {
+        const unsigned n = avail > 256 ? 256 : avail;
+        char cmd[24];
+        snprintf(cmd, sizeof cmd, "h\\f\\x %u", n);
+        const uint64_t t0 = time_us_64();
+        if (!call("AUX", cmd, 300)) return;
+        au_last_ms = (uint32_t)((time_us_64() - t0) / 1000u);
+        if (au_last_ms > au_worst_ms) au_worst_ms = au_last_ms;
+        const int got = hex_bytes(reply, b, sizeof b);
+        au_reads++;
+        au_bytes += (uint32_t)got;
+        au_rate_bytes += (uint32_t)got;
+        au_samples(b, got);
+        avail -= n;
+    }
+    if (now - au_rate_t0 >= 1000000u) {
+        au_rate = au_rate_bytes;
+        au_rate_bytes = 0;
+        au_rate_t0 = now;
+    }
 }
 
 static void start(void) {
@@ -250,10 +695,35 @@ int main(void) {
     fw2_app_recovery_sleep_ms(100);
     start();
 
+    audio_init();
+    const bool touch_ok = ft6336_init();
+    line(ROW_USB, C_WHITE, "USB PORTS...");
+    {   /* zone 8 (USB hub) up, then port power, then the native host controller */
+        const uint32_t bit = picpwr_zone_bit(PICPWR_ZONE_USB_HUB);
+        picpwr_keep_awake(bit);
+        for (uint32_t waited = 0; waited < 5000 && !usb_ok; waited += 25) {
+            uint32_t rails = 0;
+            usb_ok = picpwr_rails(&rails) && (rails & bit);
+            if (!usb_ok) { picpwr_task(); fw2_app_recovery_sleep_ms(25); }
+        }
+        if (usb_ok) {
+            ioexp_usb_pwr(true);
+            hh_usb_init();
+        }
+    }
+    DIAG("fwmame: touch %d, usb ports %d\n", (int)touch_ok, (int)usb_ok);
+    show_usb();
+    draw_learn_button();
+    if (audio_ok) draw_volume();
+
     uint64_t next_report_us = 0, next_check_us = time_us_64() + 2000000u, next_refresh_us = 0;
+    uint64_t next_usb_show_us = 0;
+    bool was_touch = false, was_hid = false, was_x = false;
     for (;;) {
         fw2_app_recovery_task();
         agentio_task();
+        picpwr_task();
+        if (usb_ok) { hh_usb_task(); usb_read_reports(); }
 
         bool changed = false;
         uartkbd_event_t ev;
@@ -262,8 +732,65 @@ int main(void) {
             const uint16_t bit = (uint16_t)(1u << ev.btn);
             const uint16_t next = ev.pressed ? (uint16_t)(buttons | bit) : (uint16_t)(buttons & ~bit);
             if (next != buttons) { buttons = next; changed = true; }
+            if (learn >= 0 && ev.pressed && ev.btn == UARTKBD_BTN_GREY) {   /* skip this control */
+                map.rule[learn].op = OP_NONE;
+                learn_next();
+            }
         }
+
+        /* USB controller: plug / unplug, reports, learning */
+        if (usb_ok) {
+            const hh_status_t *us = hh_usb_status();
+            const bool dev = us->state == HH_ST_DEVICE;
+            hid_present = dev && us->kind == HH_KIND_HID;
+            x_present = dev && us->kind == HH_KIND_XINPUT;
+            if (!hid_present && was_hid) { map_ok = false; learn = -1; learn_wait = false; hid_len = 0; }
+            if (!x_present && was_x) { memset(&xpad, 0, sizeof xpad); x_new = true; }
+            if (hid_present != was_hid || x_present != was_x) {
+                if (hid_present && !was_hid) {
+                    hid_vid = us->vid;
+                    hid_pid = us->pid;
+                    map_ok = map_load();
+                    DIAG("fwmame: HID %04x:%04x, map %d\n", hid_vid, hid_pid, (int)map_ok);
+                    if (!map_ok) learn_start();
+                }
+                was_hid = hid_present;
+                was_x = x_present;
+                draw_learn_button();
+                show_usb();
+                x_new = hid_new = true;
+            }
+            if (hid_new || x_new) {
+                if (hid_new && learn_wait) learn_start();
+                else if (hid_new && learn >= 0) learn_report();
+                hid_new = x_new = false;
+                const uint16_t old_bits = pad_bits;
+                const int8_t old_x = stick_x, old_y = stick_y;
+                pad_update();
+                if (pad_bits != old_bits || stick_x != old_x || stick_y != old_y) changed = true;
+            }
+        }
+        if (touch_ok) {
+            uint16_t tx, ty;
+            const bool down = ft6336_poll(&tx, &ty);
+            if (down && !was_touch && hid_present && !x_present && tx >= LEARN_X && tx < LEARN_X + LEARN_W &&
+                ty >= LEARN_Y && ty < LEARN_Y + LEARN_H)
+                learn_start();
+            static uint64_t vol_last_us;                 /* one step per tap: ignore bounces for 250 ms */
+            if (down && !was_touch && ty + 4 >= VOL_Y && ty < VOL_Y + VOL_H + 4 &&
+                time_us_64() - vol_last_us > 250000u) {   /* volume buttons */
+                if (tx >= VOLM_X && tx < VOLM_X + VOL_W && vol_level > 0) { vol_level--; draw_volume(); }
+                if (tx >= VOLP_X && tx < VOLP_X + VOL_W && vol_level < 10) { vol_level++; draw_volume(); }
+                vol_last_us = time_us_64();
+            }
+            was_touch = down;
+        }
+
         const uint64_t now = time_us_64();
+        if (now >= next_usb_show_us) {   /* raw report and pad state, 4 times a second */
+            show_usb();
+            next_usb_show_us = now + 250000u;
+        }
         if (changed || now >= next_refresh_us) {
             if (changed) draw_buttons();
             if (running && !write_inputs()) DIAG("fwmame: input write failed\n");
@@ -271,6 +798,11 @@ int main(void) {
             line(ROW_STATS, C_GREY, "WR %lu  FAIL %lu  %lu/%lu MS", (unsigned long)writes,
                  (unsigned long)write_fails, (unsigned long)last_ms, (unsigned long)worst_ms);
         }
+        audio_task();
+        if (now >= next_report_us && audio_ok)          /* audio stats on the link line, once a second */
+            line(ROW_LINK, C_GREY, "AU %lu U%lu D%lu P%lu R%lu %luMS", (unsigned long)au_rate,
+                 (unsigned long)au_under, (unsigned long)au_drops, (unsigned long)au_dups,
+                 (unsigned long)au_resync, (unsigned long)au_worst_ms);
         if (now >= next_report_us) {
             report_zones();
             next_report_us = now + 1000000u;
@@ -282,6 +814,6 @@ int main(void) {
             }
             next_check_us = time_us_64() + 2000000u;
         }
-        fw2_app_recovery_sleep_ms(2);
+        fw2_app_recovery_sleep_ms(1);
     }
 }

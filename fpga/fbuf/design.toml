@@ -1,11 +1,11 @@
 [design]
 name          = "fbuf"
 description   = "FW-MAME framebuffer: CM0 frames over SPI into SPRAM, 256-color palette, 15 kHz RGB333 + CSYNC on the header"
-version       = "002"
+version       = "003"
 design_id     = 17986          # 0x4642 "FB"
 kind          = "user"
 clock_hz      = 25000000       # FW-TPG's timing: 40 ns clocks, 1589-clock lines
-capabilities  = ["IO_BUFFER"]
+capabilities  = ["IO_BUFFER", "STREAM"]   # STREAM: the shell's FIFO to MAIN carries audio
 repository    = "github.com/jsimonICS/FW-MAME"
 
 # FW-MAME wilifpga patch: hand the CM0 nets to user_core (cm0_in / cm0_out).

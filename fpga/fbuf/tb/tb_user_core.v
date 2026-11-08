@@ -18,6 +18,7 @@ reg  [7:0] reg_wdata = 8'd0;
 reg        reg_wr = 1'b0;
 wire [7:0] reg_rdata;
 reg  [4:0] cm0_in = 5'b11000;        // CS_n high, TXD idle
+reg        rx_ready = 1'b1;          // the shell's stream FIFO has room
 wire [1:0] cm0_out;
 wire [9:0] hdr_out, hdr_oe, rp_out;
 wire       fifo_tx_ready, fifo_rx_valid;
@@ -29,7 +30,7 @@ user_core dut (
   .rp_in(10'd0), .rp_out(rp_out),
   .reg_addr(reg_addr), .reg_wdata(reg_wdata), .reg_wr(reg_wr), .reg_rd(1'b0), .reg_rdata(reg_rdata),
   .fifo_tx_data(8'd0), .fifo_tx_valid(1'b0), .fifo_tx_ready(fifo_tx_ready),
-  .fifo_rx_data(fifo_rx_data), .fifo_rx_valid(fifo_rx_valid), .fifo_rx_ready(1'b0),
+  .fifo_rx_data(fifo_rx_data), .fifo_rx_valid(fifo_rx_valid), .fifo_rx_ready(rx_ready),
   .cm0_in(cm0_in), .cm0_out(cm0_out)
 );
 
@@ -179,6 +180,11 @@ task check_field(input [8*32-1:0] what);
   end
 endtask
 
+// bytes the core pushes into the stream FIFO
+reg [7:0] au_buf [0:1023];
+integer   au_n = 0;
+always @(posedge clk) if (fifo_rx_valid && rx_ready) begin au_buf[au_n] = fifo_rx_data; au_n = au_n + 1; end
+
 reg [7:0]  v8;
 reg [31:0] v32;
 integer t0, hs_len;
@@ -188,7 +194,7 @@ initial begin
   rst_n = 1'b1;
   repeat (4) @(posedge clk);
 
-  rreg(7'h12, v8); check(v8 == 8'd2, "revision");
+  rreg(7'h12, v8); check(v8 == 8'd3, "revision");
   rreg(7'h18, v8); check(v8 == 8'd0, "WIDTH reset low byte (256)");
   rreg(7'h19, v8); check(v8 == 8'd1, "WIDTH reset high byte (256)");
   rreg(7'h20, v8); check(v8 == 8'd5, "CPP reset");
@@ -272,9 +278,33 @@ initial begin
   $display("  packet inputs %016h, status %02h", pk_inputs, st_last);
   check(pk_bad == 0, "packets well formed");
 
+  // ---- audio: AUDIO packet words become stream FIFO bytes, low byte first ----
+  au_n = 0;
+  hdr(8'h05, 8'h00, 16'd0);
+  for (i = 0; i < 100; i = i + 1) begin pkt[4 + 2 * i] = i[7:0]; pkt[5 + 2 * i] = 8'h80 + i[7:0]; end
+  half_ps = 7_500;                   // 66.7 MHz: a word every 6 clocks
+  spi_send(4 + 200);
+  half_ps = 10_000;
+  repeat (20) @(posedge clk);
+  check(au_n == 200, "audio bytes pushed");
+  j = 0;
+  for (i = 0; i < 100; i = i + 1)
+    if (au_buf[2 * i] !== i[7:0] || au_buf[2 * i + 1] !== 8'h80 + i[7:0]) j = j + 1;
+  check(j == 0, "audio bytes in order");
+  $display("  audio: %0d bytes pushed, %0d wrong", au_n, j);
+  // FIFO full: bytes are dropped and counted
+  rx_ready = 1'b0;
+  hdr(8'h05, 8'h00, 16'd0); pkt[4] = 8'h11; pkt[5] = 8'h22; pkt[6] = 8'h33; pkt[7] = 8'h44;
+  spi_send(8);
+  rx_ready = 1'b1;
+  repeat (10) @(posedge clk);
+  wreg(7'h11, 8'h02);
+  r32(7'h3A, v32); check(v32 == 200, "audio byte counter");
+  rreg(7'h3E, v8); check(v8 == 8'd4, "audio drops counted");
+
   // ---- counters ----
   wreg(7'h11, 8'h02);
-  r32(7'h24, v32); check(v32 == 17, "packets"); $display("  packets %0d", v32);
+  r32(7'h24, v32); check(v32 == 19, "packets"); $display("  packets %0d", v32);
   rreg(7'h2C, v8); check(v8 == 5, "flips");
   rreg(7'h2E, v8); check(v8 == 1, "ignored packets");
   rreg(7'h2F, v8); check(v8 == 0, "no overruns or underruns");

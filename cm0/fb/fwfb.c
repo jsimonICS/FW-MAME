@@ -167,6 +167,23 @@ int fwfb_pixels(fwfb *fb, unsigned addr, const uint8_t *px, size_t n) {
   return 0;
 }
 
+int fwfb_audio(fwfb *fb, const int16_t *s, size_t n) {
+    size_t max = (fb->max_pkt - 4) / 2;
+    while (n) {
+        size_t k = n < max ? n : max;
+        header(fb, 0x05, 0, 0);
+        for (size_t i = 0; i < k; i++) {             // 14 bits in two self-marking bytes (fwfb.h)
+            const unsigned v = (unsigned)(s[i] >> 2) & 0x3FFFu;
+            fb->tx[4 + 2 * i] = (uint8_t)((v & 0x7Fu) << 1);
+            fb->tx[5 + 2 * i] = (uint8_t)(((v >> 7) << 1) | 1u);
+        }
+        if (send_packet(fb, 4 + 2 * k)) return -1;
+        s += k;
+        n -= k;
+    }
+    return 0;
+}
+
 // Feed received bytes to the packet parser; returns the number of whole packets.
 static int parse(fwfb *fb, const uint8_t *b, ssize_t n) {
   int done = 0;

@@ -16,6 +16,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 #include <time.h>
 
 static int W = 256, H = 224, CPP = 0;
@@ -228,6 +229,36 @@ static int cmd_input(void) {
   return 0;
 }
 
+// Test tone for the FW2 speaker: a sine at --freq Hz (default 440), 16-bit mono
+// at 16 kHz by the CM0's clock, sent once per field (fbuf v003+).
+static double tone_freq = 440.0;
+static int cmd_tone(void) {
+    fwfb *fb = fwfb_open(HZ);
+    if (!fb) return 1;
+    static int16_t buf[2048];
+    double t0 = now_s(), phase = 0;
+    long long due_total = 0, sent = 0;
+    while (now_s() - t0 < SECONDS) {
+        if (fwfb_wait_status(fb, 100) < 0) { fprintf(stderr, "no packet in 100 ms\n"); return 1; }
+        const long long due = (long long)((now_s() - t0) * 16000.0);
+        int n = (int)(due - sent);
+        if (n > 2048) n = 2048;
+        for (int i = 0; i < n; i++) {
+            buf[i] = (int16_t)(8000.0 * sin(phase));
+            phase += 2.0 * M_PI * tone_freq / 16000.0;
+            if (phase > 2.0 * M_PI) phase -= 2.0 * M_PI;
+        }
+        if (n > 0 && fwfb_audio(fb, buf, (size_t)n)) return 1;
+        sent += n;
+        due_total = due;
+    }
+    printf("tone %.0f Hz: %lld samples in %.1f s (%.0f/s)\n", tone_freq, sent, now_s() - t0,
+           sent / (now_s() - t0));
+    (void)due_total;
+    fwfb_close(fb);
+    return 0;
+}
+
 static int usage(void) {
   fprintf(stderr, "usage: fbsend card | image RAW [PAL] | anim | input | ramp on|off   [--size WxH] [--cpp N] [--hz N] [--seconds S]\n");
   return 2;
@@ -241,6 +272,7 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[i], "--cpp") && i + 1 < argc) CPP = atoi(argv[++i]);
     else if (!strcmp(argv[i], "--hz") && i + 1 < argc) HZ = atol(argv[++i]);
     else if (!strcmp(argv[i], "--seconds") && i + 1 < argc) SECONDS = atof(argv[++i]);
+    else if (!strcmp(argv[i], "--freq") && i + 1 < argc) tone_freq = atof(argv[++i]);
     else if (npos < 3) pos[npos++] = argv[i];
     else return usage();
   }
@@ -252,6 +284,7 @@ int main(int argc, char **argv) {
   if (!strcmp(pos[0], "image") && pos[1]) return cmd_image(pos[1], pos[2]);
   if (!strcmp(pos[0], "anim")) return cmd_anim();
   if (!strcmp(pos[0], "input")) return cmd_input();
+  if (!strcmp(pos[0], "tone")) return cmd_tone();
   if (!strcmp(pos[0], "ramp") && pos[1]) {
     fwfb *fb = fwfb_open(HZ);
     if (!fb) return 1;

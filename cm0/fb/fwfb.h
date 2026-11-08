@@ -43,6 +43,14 @@ int fwfb_mode(fwfb *fb, int width, int height, int cpp);
 int fwfb_palette(fwfb *fb, int first, int n, const uint16_t *rgb333);
 // Pixels into the back buffer at byte address addr (even); n is rounded down to even.
 int fwfb_pixels(fwfb *fb, unsigned addr, const uint8_t *px, size_t n);
+// Audio for the FW2's speaker: 16-bit signed mono samples at 16 kHz, into the
+// FPGA's stream FIFO (fbuf v003+), which the FW2 display app reads and plays.
+// Send about 16000 samples per second (267 per 60 Hz frame); the app evens
+// out small rate differences. On the wire each sample is cut to 14 bits and
+// sent as two self-marking bytes: low = bits 6:0 << 1 (bit 0 = 0), high =
+// bits 13:7 << 1 | 1. The FIFO drops single bytes when it is full; with the
+// marks the app re-locks on the next byte instead of turning the rest into noise.
+int fwfb_audio(fwfb *fb, const int16_t *samples, size_t n);
 // Show the back buffer: sends FLIP and waits until the FPGA reports it done
 // (at the next vertical blank, at once if already in it). Returns 0, or -1 on timeout.
 int fwfb_flip(fwfb *fb);

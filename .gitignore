@@ -1,3 +1,5 @@
 __pycache__/
 *.pyc
 /build-fw2/
+# Game ROMs: never commit (copyright of their owners)
+/roms/
